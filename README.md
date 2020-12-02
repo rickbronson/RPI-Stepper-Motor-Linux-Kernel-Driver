@@ -24,24 +24,63 @@ Untested
 
 ```
 sudo apt update
-sudo apt install git
+sudo apt install git bc bison flex libssl-dev make git
 ```
 
-2. Get and build everything:
+2. Get and build everything. We have to tweak the device tree and need a header inside the kernel so we have to build.  We will keep your old kernel so you can go back to that if need be.  This kernel and module directory will have "motor" in the name.
 
 ```
 git clone --recursive https://github.com/rickbronson/RPI-Stepper-Motor-Linux-Kernel-Driver.git
-cd RPI-Stepper-Motor-Linux-Kernel-Driver/src
-make
 ```
-  NOTE: I needed to make a change to the device tree so you will need to get it in the src directory and put it in arch/arm/boot/dts/bcm270x.dtsi and build the device tree via:
+
+  At this point we need to grab the kernel since we are going to change one of the device tree files
+
 ```
-cd linux # or wherever your kernel sits
-make -j4 dtbs
+sudo cp -a /boot /boot.sav  # save old kernel and device tree (optional)
+git clone --depth=1 https://github.com/raspberrypi/linux
+cd linux
+KERNEL=kernel7l-motor
+make bcm2711_defconfig
+sed -i -e "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-v7l-motor\"/" .config
+```
+
+  Now we need to insert our file
+
+```
+cp -f ../RPI-Stepper-Motor-Linux-Kernel-Driver/src/bcm270x.dtsi arch/arm/boot/dts/bcm270x.dtsi
+```
+
+  Then continue building the kernel
+
+```
+make -j4 zImage modules dtbs  # takes about 1 hour on RPI4
+sudo make modules_install
 sudo cp arch/arm/boot/dts/*.dtb /boot/
 sudo cp arch/arm/boot/dts/overlays/*.dtb* /boot/overlays/
+sudo cp arch/arm/boot/zImage /boot/$KERNEL.img
+sudo bash -c "echo kernel=$KERNEL.img >> /boot/config.txt"
 ```
-	
+
+  Lastly build this driver
+
+```
+cd ../RPI-Stepper-Motor-Linux-Kernel-Driver/src/
+make
+sudo reboot # to run newly made kernel above
+```
+
+  When you come up from the reboot doing:
+
+```
+uname -a
+```
+
+  Should show:
+
+```
+Linux raspberrypi 5.4.80-v7l-motor+...
+```
+
 3. Hookup
 --------------
 
