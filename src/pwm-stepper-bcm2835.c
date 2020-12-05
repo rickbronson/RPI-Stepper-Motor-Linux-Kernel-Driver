@@ -79,7 +79,6 @@ NOTE: need to blacklist pwm-bcm2835
 #include <linux/of.h>
 #include <linux/pwm.h>
 #include "rpi4-stepper.h"
-#include <../drivers/dma/virt-dma.h>
 #include "bcm2835-dma.h"
 
 MODULE_AUTHOR("Rick Bronson <rick@efn.org>");
@@ -615,7 +614,7 @@ static int bcm2835_pwm_remove(struct platform_device *pdev)
 	dma_free_coherent(&pdev->dev, priv->dma_size, priv->dma_send_buf, priv->dma_handle); 
 	kfree(priv);
 	printk(KERN_INFO "Rick debug bcm2835_pwm_remove 3\n");
-// 	platform_device_unregister(pdev); hangs, never returns from:  c078d00c:	eb0c0ad8 	bl	c0a8fb74 <mutex_lock>
+// 	platform_device_unregister(pdev); // hangs, never returns from:  c078d00c:	eb0c0ad8 	bl	c0a8fb74 <mutex_lock>
 	printk(KERN_INFO "Rick debug bcm2835_pwm_remove 4\n");
 	return ret;
 }
