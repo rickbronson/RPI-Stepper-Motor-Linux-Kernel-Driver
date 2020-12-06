@@ -20,13 +20,13 @@ Untested
 - Only tested on RPI-4
 - Multiple motors untested
 
-1. Get and build everything. We have to tweak the device tree and need a header inside the kernel so we have to build.  We will keep your old kernel so you can go back to that if need be.  This kernel and module directory will have "motor" in the name.
+1. Get and build everything. We have to tweak the device tree and need a header inside the kernel so we have to build just the device tree.  Optionally, you can keep your old kernel and device tree so you can go back to that if need be.
 
 ```
 git clone --recursive https://github.com/rickbronson/RPI-Stepper-Motor-Linux-Kernel-Driver.git
 ```
 
-  At this point we need to get a kernel running that we can get the linux-headers for.
+  At this point we need to get a kernel running that we can get the linux-headers for.  I couldn't not get the headers for the kernel I got with the zip file.
 
 ```
 sudo cp -a /boot /boot.sav  # save old kernel and device tree (optional)
@@ -94,11 +94,11 @@ sudo test-stepper -d 500 -n 400 -s 4000 -r 1 -m 7  # move 500 microsteps, start 
 sudo test-stepper -d 500 -n 400 -s 4000 -r 3 -m 7  # same, more aggressive curve
 ```
 
-  I test my motor up to 215000 Hz (without load at "-m 7" and it worked well.
+  I tested my motor up to 215000 Hz (without load) at "-m 7" and it worked well.
 
 5. Debug
 
-  See pwm-stepper-bcm2835.c for printk statements.
+  See pwm-stepper-bcm2835.c for printk statements.  Use "sudo dmesg" to view them.
 
   You can generate the speed profile using the test-stepper program with the "-g" option as below:
 
