@@ -22,6 +22,7 @@ To run:
 #include <sys/mman.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 typedef unsigned char		u8;
 typedef unsigned short		u16;
 typedef unsigned int		u32;
@@ -32,12 +33,14 @@ typedef int			s32;
 typedef long long		s64;
 #include "rpi4-stepper.h"
 
+#define PERI_BASE   0xfe000000
+#define SYSTEM_TIMER_CLO (PERI_BASE + 0x00003004)  /* based on 1 MHz */
 
 #define STEP_CMD_FILE "/sys/devices/platform/soc/fe20c000.pwm/cmd"
 
 /* A string listing valid short options letters.  */
 const char* program_name;  /* The name of this program.  */
-const char* const short_options = "d:s:n:m:p:r:gtv";
+const char* const short_options = "d:s:n:m:p:r:l:y:tv";
   /* An array describing valid long options.  */
 const struct option long_options[] = {
     { "distance",      1, NULL, 'd' },
@@ -46,7 +49,8 @@ const struct option long_options[] = {
     { "microstep",     1, NULL, 'm' },
     { "step_gpio",     1, NULL, 'p' },
     { "ramp",     1, NULL, 'r' },
-    { "generate",     0, NULL, 'g' },
+    { "loop",     1, NULL, 'l' },
+    { "delay",     1, NULL, 'y' },
     { "status",     0, NULL, 't' },
     { "verbose",   0, NULL, 'v' },
     { NULL,        0, NULL, 0   }   /* Required at end of array.  */
@@ -62,7 +66,8 @@ void print_usage (FILE* stream, int exit_code)
            "  -m  --microstep    Microstep [7]\n"
            "  -p  --step_gpio    Step GPIO [13]\n"
            "  -r  --ramp         Ramp_aggressiveness 1-X (lower 4 bits are treated as a fraction)\n"
-           "  -g  --generate     Generate waveform graph\n"
+           "  -l  --loop         Loop count\n"
+           "  -y  --delay        Delay between loops in milliseconds\n"
            "  -t  --status       Get DMA status register\n"
            "  -v  --verbose      Print verbose messages.\n");
   exit (exit_code);
@@ -102,12 +107,33 @@ struct STEPPER_SETUP setup =
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
 #define PERIOD_INC 10  /* in tenth's */
 	.ramp_aggressiveness = PERIOD_INC,
-	.gpio_step = GPIO_13,
-	.gpio_direction = GPIO_06,
-	.gpio_microstep0 = GPIO_19,
-	.gpio_microstep1 = GPIO_20,
-	.gpio_microstep2 = GPIO_21,
+	.gpios[GPIO_STEP] = GPIO_13,
+	.gpios[GPIO_DIRECTION] = GPIO_06,
+	.gpios[GPIO_MICROSTEP0] = GPIO_19,
+	.gpios[GPIO_MICROSTEP1] = GPIO_20,
+	.gpios[GPIO_MICROSTEP2] = GPIO_21,
 	};
+
+#define MAP_SIZE 4096UL
+#define MAP_MASK (MAP_SIZE - 1)
+static int map_read_mem(off_t addr)
+  {
+  void *map_base, *virt_addr; 
+  int fd, retval;
+
+  if ((fd = open("/dev/mem", O_RDWR | O_SYNC)) == -1)
+    return (fd);
+  /* Map one page */
+  map_base = mmap(0, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, addr & ~MAP_MASK);
+  if (map_base == (void *) -1)
+    return -1;
+    
+  virt_addr = map_base + (addr & MAP_MASK);
+  retval = *((unsigned long *) virt_addr);
+  if (munmap(map_base, MAP_SIZE) == -1)
+    return -1;
+  return (retval);
+  }
 
 #define printk printf
 #define KERN_INFO
@@ -132,8 +158,11 @@ static struct bcm2708_dma_cb *build1pulse(struct stepper_priv *priv, struct bcm2
  */
 int main(int argc,char **argv) {
   int next_option;
-	int steps, fd, generate = 0, get_status = 0;
+	int steps, fd, msdelay = 0, loop = 1, get_status = 0;
 	struct stepper_priv *priv = &priv_data;
+	int system_timer_regs;
+	struct timespec ts = { 0, 5000000 };
+	
 	memcpy(&priv->step_cmd, &setup, sizeof(struct STEPPER_SETUP));
   do
     {
@@ -160,7 +189,7 @@ int main(int argc,char **argv) {
 				priv->step_cmd.microstep_control = strtoul (optarg, NULL, 0);
         break;
       case 'p':   /* -p or --step_gpio */
-				priv->step_cmd.gpio_step = strtoul (optarg, NULL, 0);
+				priv->step_cmd.gpios[GPIO_STEP] = strtoul (optarg, NULL, 0);
         break;
       case 'r':   /* -r or --ramp */
         priv->step_cmd.ramp_aggressiveness = strtoul (optarg, NULL, 0);
@@ -169,8 +198,11 @@ int main(int argc,char **argv) {
 					exit(1);
 					}
         break;
-      case 'g':   /* -g or --generate */
-        generate = 1;
+      case 'l':   /* -l or --loop */
+        loop = strtoul (optarg, NULL, 0);
+        break;
+      case 'y':   /* -y or --delay */
+        msdelay = strtol (optarg, NULL, 0);
         break;
       case 't':   /* -t or --status */
         get_status = 1;
@@ -194,103 +226,39 @@ int main(int argc,char **argv) {
   if (priv->verbose)
     printf ("RPI4 PWM motor driver tester\n");
 
-	if (generate) {  /* generate sample waveform via gnuplot */
-		int limit, cntr, up_index, index = 0, freq, diff;
-		struct bcm2708_dma_cb *pCbs;
-
-		priv->dma_send_buf = (struct dma_data *) calloc(1024 * 1024 * 64, sizeof(int));  /* get a lot of memory */
-
-		/* ramp up */
-		pCbs = priv->dma_send_buf->cbs;  /* pointer to DMA control block */
-
-		/* do UP ramp, First go 1/2 the UP ramp: can't exceed 1/4
-			 the distance and can't go over 1/2 max speed */
-		freq = priv->step_cmd.min_speed;  /* start off freq */
-		diff = priv->step_cmd.ramp_aggressiveness;  /* base 1st diff on ramp_aggressiveness */
-		limit = priv->step_cmd.min_speed + (priv->step_cmd.max_speed - priv->step_cmd.min_speed) / 2;
-		do {
-			if (priv->verbose)
-				printk(KERN_INFO "1/4 UP freq = %d, diff = %d   ", freq, diff);
-			pCbs = build1pulse(priv, pCbs, index++, PWM_FREQ / freq / 2);
-			freq += diff / DIFF_SCALE;
-			diff += priv->step_cmd.ramp_aggressiveness;
-			}
-		while (freq <= limit && index < priv->step_cmd.distance / 4);
-	
-		diff -= priv->step_cmd.ramp_aggressiveness;  /* roll back from last time through above loop */
-		freq -= diff / DIFF_SCALE;
-		diff -= priv->step_cmd.ramp_aggressiveness + 2;  /* prepare for next loop */
-		freq += diff / DIFF_SCALE;
-
-		printk(KERN_INFO "Rick debug 1/4 UP index = %d, distance = %d speed = %d, aggr = %d\n", index, priv->step_cmd.distance, priv->step_cmd.max_speed, priv->step_cmd.ramp_aggressiveness);
-		/* Do 2nd half of UP ramp */
-		do {
-			pCbs = build1pulse(priv, pCbs, index++, PWM_FREQ / freq / 2);
-			freq += diff / DIFF_SCALE;
-			diff -= priv->step_cmd.ramp_aggressiveness;
-			if (diff < DIFF_SCALE)
-				diff += DIFF_SCALE;  /* can't let diff go below scale */
-//			printk(KERN_INFO "Rick debug 2nd half of UP index = %d, diff = %d, freq = %d\n", index, diff, freq);
-			}
-		while (freq <= priv->step_cmd.max_speed && index < priv->step_cmd.distance / 2);
-		
-		up_index = index;
-		printk(KERN_INFO "Rick debug UP index = %d, distance = %d speed = %d, aggr = %d\n", index, priv->step_cmd.distance, priv->step_cmd.max_speed, priv->step_cmd.ramp_aggressiveness);
-
-		/* hold steady at max speed */
-		if (freq > priv->step_cmd.max_speed)
-			freq = priv->step_cmd.max_speed;
-		for (cntr = priv->step_cmd.distance - index * 2; cntr > 0; cntr--) {  /* run at max speed */
-			pCbs = build1pulse(priv, pCbs, index++, PWM_FREQ / freq / 2);
-			}
-
-		printk(KERN_INFO "Rick debug SP index = %d\n", index);
-		/* ramp down, just feed ramp up in reverse */
-		while (up_index--) {
-			pCbs = build1pulse(priv, pCbs, index++, priv->dma_send_buf->range[up_index]);
-			//			printk(KERN_INFO "Rick debug DN 0x%08x\n");
-			}
-		(pCbs - 1)->next = 0;  /* mark last one as the last */
-		printk(KERN_INFO "Rick debug DN index = %d\n", index);
-
-//	printk(KERN_INFO "Rick debug stepper_dma_start %d\n", *priv->system_timer_regs - rick_debug);
-
-//	printk(KERN_INFO "Rick debug dma_send_buf = 0x%x __pa 0x%x dma = 0x%x\n", (int) priv->dma_send_buf, (int) __pa(priv->dma_send_buf), priv->dma_regs->conblk_ad);
-
-			{
-			int cntr;
-			FILE *gnuplot = popen("gnuplot", "w");
-
-			fprintf(gnuplot, "plot '-'\n");
-			for (cntr = 0; cntr < index; cntr++)
-				fprintf(gnuplot, "%d %d\n", cntr, PWM_FREQ / 2 / priv->dma_send_buf->range[cntr]);
-			fprintf(gnuplot, "e\n");
-			fflush(gnuplot);
-			getchar();
-			}
-		free(priv->dma_send_buf);
-		exit(0);	
-		}
 	fd = open(STEP_CMD_FILE, O_RDWR | O_SYNC);  /* might need root access */
 	if ( fd < 0 ) {
 		perror(STEP_CMD_FILE);
 		exit(1);
 	}
-	if (get_status) {
-		if (read(fd, &priv->step_cmd, sizeof(priv->step_cmd)) != sizeof(priv->step_cmd)) {
-			perror(STEP_CMD_FILE);
+	for (; loop; loop--) {
+		lseek(fd, 0, SEEK_SET);
+		if (get_status) {
+			if (read(fd, &priv->step_cmd, sizeof(priv->step_cmd)) != sizeof(priv->step_cmd)) {
+				perror(STEP_CMD_FILE);
+				close(fd);
+				exit(1);
+				}
+			printf("DMA status reg = 0x%08x\n", priv->step_cmd.status);
 			close(fd);
+			exit(0);
+			}
+
+		system_timer_regs = map_read_mem(SYSTEM_TIMER_CLO);
+		if (write(fd, &priv->step_cmd, sizeof(priv->step_cmd)) != sizeof(priv->step_cmd)) {
+			perror(STEP_CMD_FILE);
 			exit(1);
 			}
-		printf("DMA status reg = 0x%08x\n", priv->step_cmd.status);
-		close(fd);
-		exit(0);
+		/* delay in milliseconds */
+		ts.tv_nsec = (msdelay % 1000) * 1000 * 1000;
+		ts.tv_sec = msdelay / 1000;
+		if (loop > 1) {
+			printf("tv_nsec = %d, tv_sec = %d\n", ts.tv_nsec, ts.tv_sec);
+			nanosleep(&ts, NULL);
+			}
 		}
-
-	if (write(fd, &priv->step_cmd, sizeof(priv->step_cmd)) != sizeof(priv->step_cmd)) {
-		perror(STEP_CMD_FILE);
-		exit(1);
-	}
+	system_timer_regs = map_read_mem(SYSTEM_TIMER_CLO) - system_timer_regs;
+	printf("write time = %d us\n", system_timer_regs);
 	// fflush(fd);
 	close(fd);
 	return 0;

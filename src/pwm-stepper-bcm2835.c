@@ -275,17 +275,22 @@ struct stepper_priv {
 	int dma_size;
 	void __iomem *base;  /* base addr of PWM */
 	struct clk *clk;
-};
+	char gpio_requested[64];  /* marks if these gpio's are already requested */
+	};
 
-static int request_set_gpio(GPIO pin, int value)
+static int request_set_gpio(struct stepper_priv *priv, GPIO pin, int value)
 	{
 	int ret = 0;
 
-	ret = gpio_request(pin, NULL);
-	if (ret)
-		printk(KERN_INFO "Can't request gpio pin %d\n", pin);
-	else
-		gpio_direction_output(pin, value & 1);
+	if (!priv->gpio_requested[pin]) {  /* only request if we don't already have it */
+		ret = gpio_request(pin, NULL);
+		if (ret)
+			printk(KERN_INFO "Can't request gpio pin %d\n", pin);
+		else {
+			gpio_direction_output(pin, value & 1);
+			priv->gpio_requested[pin] = 1;
+			}
+		}
 	return ret;
 	}
 
@@ -293,16 +298,19 @@ static irqreturn_t bcm2835_dma_callback(int irq, void *data)
 	{
 	struct stepper_priv *priv = data;
 	unsigned long flags;
+	int cntr, pin;
 
 	spin_lock_irqsave(&priv->lock, flags);
 	priv->dma_regs->cs = DMA_INTERRUPT_STATUS;  /* Clear the INT flag */
 	spin_unlock_irqrestore(&priv->lock, flags);
 
-	gpio_free(priv->step_cmd.gpio_microstep0);  /* give up GPIO pins */
-	gpio_free(priv->step_cmd.gpio_microstep1);
-	gpio_free(priv->step_cmd.gpio_microstep2);
-	gpio_free(priv->step_cmd.gpio_direction);
-	gpio_free(priv->step_cmd.gpio_step);
+	for (cntr = 0; cntr < GPIO_CONTROL_MAX; cntr++) {
+		pin = priv->step_cmd.gpios[cntr];
+		if (priv->gpio_requested[pin]) {  /* only free if we have it */
+			gpio_free(priv->step_cmd.gpios[cntr]);  /* give up GPIO pins */
+			priv->gpio_requested[pin] = 0;
+			}
+		}
 	printk(KERN_INFO "Rick debug dma int complete %dms\n", (*priv->system_timer_regs - rick_debug) / 1000);
 	rick_debug = *priv->system_timer_regs;
 
@@ -455,22 +463,22 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 				struct bin_attribute *bin_attr,
 				char *buffer, loff_t pos, size_t count)
 	{
-
 	int ret;
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct stepper_priv *priv = dev_get_drvdata(dev);
 	struct S_PWM_REGS *pwm_regs = priv->pwm_regs;
-
+	int timer = *priv->system_timer_regs;
+	
 	memcpy(&priv->step_cmd, buffer, count);
-	printk(KERN_INFO "Rick debug microstep_control = %d, step = %d\n", priv->step_cmd.microstep_control, priv->step_cmd.gpio_step);
+	printk(KERN_INFO "Rick debug microstep_control = %d, step = %d\n", priv->step_cmd.microstep_control, priv->step_cmd.gpios[GPIO_STEP]);
 
 	/* Setting the GPIO pins */
-	ret = request_set_gpio(priv->step_cmd.gpio_microstep0, priv->step_cmd.microstep_control >> 0);
-	ret |= request_set_gpio(priv->step_cmd.gpio_microstep1, priv->step_cmd.microstep_control >> 1);
-	ret |= request_set_gpio(priv->step_cmd.gpio_microstep2, priv->step_cmd.microstep_control >> 2);
-	ret |= request_set_gpio(priv->step_cmd.gpio_direction, priv->step_cmd.distance >= 0 ? 1 : 0);
+	ret = request_set_gpio(priv, priv->step_cmd.gpios[GPIO_MICROSTEP0], priv->step_cmd.microstep_control >> 0);
+	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_MICROSTEP1], priv->step_cmd.microstep_control >> 1);
+	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_MICROSTEP2], priv->step_cmd.microstep_control >> 2);
+	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_DIRECTION], priv->step_cmd.distance >= 0 ? 1 : 0);
 	priv->step_cmd.distance = abs(priv->step_cmd.distance);
-	ret |= request_set_gpio(priv->step_cmd.gpio_step, 0);
+	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_STEP], 0);
 	if (ret)
 		return -EBUSY;
 
@@ -493,16 +501,19 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 	pwm_regs->control.ctl = PWM_CTL_USEF1 | PWM_CTL_MODE1 | PWM_CTL_PWEN1;
 
 	if (priv->dma_regs->conblk_ad)  { // busy? debug only, won't need if abort works below
+		priv->dma_regs->cs = DMA_CHANNEL_ABORT;
 		printk(KERN_ERR "Rick pwm-stepper: DMA busy, aborting\n");
-		return -EBUSY;
+//		return -EBUSY;
 		}
-	rick_debug = *priv->system_timer_regs;  /* dave current timer */
+	rick_debug = *priv->system_timer_regs;  /* save current timer */
 
 	printk(KERN_INFO "Rick debug chan = %d: dma ADDR = 0x%x, handle = 0x%x\n", priv->dma_chan_tx->chan_id, (int) priv->dma_regs, (int) priv->dma_handle);
 
-	priv->dma_send_buf->gpio_val = 1 << priv->step_cmd.gpio_step;  /* set our step GPIO */
+	priv->dma_send_buf->gpio_val = 1 << priv->step_cmd.gpios[GPIO_STEP];  /* set our step GPIO */
 	pwm_frequency(priv, PWM_FREQ);
 	stepper_transfer_dma(priv);
+	timer = *priv->system_timer_regs - timer;
+	printk(KERN_INFO "Rick debug step_cmd_write end %d us\n", timer);
 	return count;
 	}
 

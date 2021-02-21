@@ -9,7 +9,7 @@ driver:
 	objdump -DS $(obj-m) > $(obj-m).S
 
 clean:
-	rm -f *.o test-stepper
+	rm -f *.o test-stepper *.lis pwm-stepper*.S
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 
 test-stepper:	test-stepper.c rpi4-stepper.h

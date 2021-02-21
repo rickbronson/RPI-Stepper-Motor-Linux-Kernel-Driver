@@ -49,6 +49,14 @@
  NOTE that: PWM and audio share the same clock and thus changing the clock divisor immediately distorts the audio
 */
 
+typedef enum {
+	GPIO_MICROSTEP0,
+	GPIO_MICROSTEP1,
+	GPIO_MICROSTEP2,
+	GPIO_DIRECTION,
+	GPIO_STEP,
+	GPIO_CONTROL_MAX,} GPIO_CONTROL;
+
 /* RAMP pins available on connector p1 */
 typedef enum {RAMP_LOW = 0,
 	RAMP_MODERATE = 1,
@@ -92,11 +100,7 @@ struct STEPPER_SETUP
 	u8 microstep_control;  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, set the step mode - 0=full, 1=1/2, 2=1/4, 3=1/8/ 4=1/16, etc step. Internal pulldown.
  */
 	RAMP ramp_aggressiveness;  /* 0 = 1/2 ramp up/down 1=1/3, 2=1/4, 3=1/5, etc */
-	GPIO gpio_step;  /* pwm0 possible outputs are GPIO12 (All models but A and B), GPIO18 */
-	GPIO gpio_direction;  /* any GPIO */
-	GPIO gpio_microstep0;  /* any GPIO */
-	GPIO gpio_microstep1;  /* any GPIO */
-	GPIO gpio_microstep2;  /* any GPIO */
+	GPIO gpios[GPIO_CONTROL_MAX];  /* any GPIO */
 	u32 status;  /* upon read, shows the control status register of the DMA, see page 52 of rpi_DATA_2711_1p0.pdf  */
 	};
 
