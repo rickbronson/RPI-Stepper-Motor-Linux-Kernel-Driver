@@ -1,28 +1,33 @@
   RPI Stepper Motor Linux Kernel Driver
 ==========================================
 
-This is everything you need to build a stepper motor driver that is a real Linux kernel module.
+This is everything you need to build a stepper motor driver for the Raspberry PI 4 that is a real Linux kernel module.
 
 This code consists of a Makefile, one driver C file, one test C file and a common shared header file
 
 Features
 
 - Driver runs in kernel and not in user space.
-- Uses PWM or PCM to provide delays between motor STEP cycles
+- Uses PWM to provide delays between motor STEP cycles
 - Uses DMA to stream pulses
-- Only uses 6 DMA's per motor STEP cycle (when using PWM)
-- Pulse width granularity based on 27 MHz
+- Only uses 6 DMA's per motor STEP cycle
+- Pulse edge granularity based on 27 MHz
 - Can use any unused GPIO's for STEP, DIRECTION, and MICROSTEP control pins
 - Driver smoothly ramps motor up to max speed and back down again based on a (approximate) sinusoidal curve
-- Drive multiple motors (future)
+- Drive multiple motors.
+- Can handle the same microstep control lines going to multiple motors.
 
 Constraints
-- Minimum time between any two GPIO's (can be different GPIO's or the same) pulse edges is 500ns, this seems to be a constraint of the DMA
-- Maximum number of steps is hardcoded as MAX_STEPS in rpi4-stepper.h.  Note that if the DMA is stilll streaming to motor and you ask to move motor 2, it ADD's onto the existing DMA stream.
+
+- GPIO edge granularity is 1/PWM_FREQ, about 37ns
+- Minimum time between any two GPIO edges (can be different GPIO's or the same) is about 500ns, this seems to be a constraint of the DMA
+- Driver requires a minimum amount of steps when any motor is already running. If the DMA is stilll streaming to motor 1 and you ask to move motor 2, I have to copy existing DMA control blocks (CB's), build the new motors DMA CB's and then combine them into one stream.  If the minimum is not met, I just wait until the existing stream is done.  The minimum is based on time it takes to do the copy and build plus a guess as to the time it takes to do the combine.  The fudge factor to estimate the combine time can be set via priv->step_cmd.combine_ticks_per_step
+- When the minimum time cannot be satisfied then the driver will wait (or not) for the current DMA stream to finish for priv->step_cmd.wait_timeout (in milliseconds).  If this value is zero then it doesn't wait.
+- Maximum number of steps is hardcoded as MAX_STEPS in rpi4-stepper.h.  This has a big impact on the amount of alloc'd memory.
+- Max number of motors set by MAX_MOTORS.  This has a big impact on the amount of alloc'd memory.
 
 Untested
 - Only tested on RPI-4
-- Multiple motors untested
 
 1. Get and build everything. We have to tweak the device tree and need a header inside the kernel so we have to build just the device tree.  Optionally, you can keep your old kernel and device tree so you can go back to that if need be.
 
