@@ -85,8 +85,6 @@ MODULE_AUTHOR("Rick Bronson <rick@efn.org>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Broadcom BCM2835 PWM for stepper motor driver");
 
-int rick_debug = 0;
-
 #define PERI_DMA_MASK 0x7fffffff  /* DMA seems to have a different view of addresses */
 #define PERI_BASE   0xfe000000  /* 0xfe000000 for BCM2711,
 																	 0x20000000 for BCM2835,
@@ -119,7 +117,7 @@ int rick_debug = 0;
 
 #define PWM_DMAC_ENAB      (1 << 31)
 #define PWM_DMAC_PANIC(x) ((x) << 8)
-#define PWM_DMAC_DREQ_VAL 3
+#define PWM_DMAC_DREQ_VAL 10
 #define PWM_DMAC_DREQ(x)   (x)
 
 #define CLK_PASS 0x5a000000  /* clock password */
@@ -128,6 +126,19 @@ int rick_debug = 0;
 #define CLK_CTL_KILL    (1 << 5)
 #define CLK_CTL_ENAB    (1 << 4)
 #define CLK_CTL_SRC(x)  ((x) << 0)
+
+#define TO_PHYS_KLUDGE(x) (__pa(x) | 0xc0000000)  // be nice to get rid of this
+
+#define DEBUG
+#ifdef DEBUG
+#define PRINTI(fmt, args...) printk(KERN_INFO fmt, ## args)
+#else
+#define PRINTI(fmt, args...)
+#endif	/* ATA_VERBOSE_DEBUG */
+
+typedef enum {  /* for build_dma_thread() */
+	USE_DMA_BUF,
+	USE_BUILD_BUF,} BUILDTYPE;
 
 /* GPIO registers */
 struct S_GPIO_REGS
@@ -245,17 +256,58 @@ struct S_PWM_REGS
 /**
  * Private data
  */
-#define PWM_CBS_PER_PULSE 6  /* PWM control blocks per pulse */
-#define PWM_MAX_CBS (MAX_STEPS * PWM_CBS_PER_PULSE)
+struct dma_cb1 {  /* One DMA Control Block (CB), borrowed from include/linux/platform_data/dma-bcm2708.h */
+	u32 info;
+	u32 src;
+	u32 dst;
+	u32 length;
+	u32 stride;
+	u32 next;
+	u16 index;  /* DMA unused, we use as index */
+	u16 motor;  /* DMA unused, we use as motor */
+	u32 range;  /* DMA unused, we use as range, NOTE: range is used in PWM sense, ie. it's a delay */
+};
 
+struct dma_cb3 {  /* to make it easier to deal with 3 control blocks that entail one time delay */
+	u32 info1;
+	u32 *src1;  /* pointer to range value */
+	u32 dst1;  /* GPIO perif set/clr reg */
+	u32 length1;
+	u32 stride1;
+	u32 next1;
+#define STEP_INDEX_MOTOR 0  /* index in upper 16 bits, motor in lower */
+#define STEP_RANGE 1
+	u16 index;  /* DMA unused, we use as index */
+	u16 motor;  /* DMA unused, we use as motor */
+	u32 range;  /* DMA unused, we use as range */
+	u32 info2;
+	u32 *src2;  /* any valid pointer */
+	u32 dst2;  /* PWM perif range reg */
+	u32 length2;
+	u32 stride2;
+	u32 next2;
+	u32 pad2[2];
+	u32 info3;
+	u32 src3;  /* pointer to GPIO value */
+	u32 dst3;  /* PWM perif FIFO reg */
+	u32 length3;
+	u32 stride3;
+	u32 next3;
+	u32 pad3[2];
+};
+
+#define PWM_CBS_PER_STEP 6  /* PWM control blocks per step */
+#define PWM_MAX_CBS (MAX_STEPS * PWM_CBS_PER_STEP)
 struct pwm_dma_data {  /* everything got with alloc coherent */
-	struct bcm2708_dma_cb cbs[PWM_MAX_CBS];  /* must be on 8 word boundry */
-	u32 range[MAX_STEPS];
-	u32 gpio_val;
+	struct dma_cb1 run_cbs[PWM_MAX_CBS];  /* DMA run cbs's, must be on 8 word boundry */
+	u32 range[MAX_STEPS * 2];  /* * 2 because we won't always have the same delay for each half cycle */
+	u32 step_gpio_mask[MAX_MOTORS];
 	};
 
 struct stepper_priv {
+	struct completion dma_cmpl;
 	struct STEPPER_SETUP step_cmd;
+	struct STEPPER_SETUP step_cmd_read;
 	volatile unsigned int *pwm_clk_regs; /* Holds the address of PWM CLK registers */
 	volatile struct S_DMA_REGS *dma_regs;
 #define BCM2711_DMA_CHANNELS   15  /* don't use chan 16 */
@@ -271,11 +323,19 @@ struct stepper_priv {
 	struct dma_slave_config dma_cfg;
 	dma_addr_t dma_handle;
 	struct pwm_dma_data *dma_send_buf;  /* dma data to send to motor step pin via pwm */
-	struct pwm_dma_data *dma_send_buf_phys;  /* physical addr of above */
 	int dma_size;
 	void __iomem *base;  /* base addr of PWM */
 	struct clk *clk;
-	char gpio_requested[64];  /* marks if these gpio's are already requested */
+	int motors;  /* number of motors */
+	struct dma_cb1 build_cbs[PWM_MAX_CBS];  /* place to build the Control Blocks from new command */
+	struct dma_cb3 copy_cbs[PWM_MAX_CBS / 3];  /* place to copy the Control Blocks */
+	struct dma_cb1 *cur_buf_end; /* current dma end (from build or combine) */
+	struct dma_cb1 *dma_buf_end; /* for end check */
+#define GPIO_RPI4_MAX 28
+	unsigned char gpio_requested[GPIO_RPI4_MAX];  /* marks if these gpio's are already requested */
+#define NO_MOTOR 255
+	unsigned char gpio2motor[GPIO_RPI4_MAX];  /* Keeps track of motor index */
+	int timer_save;
 	};
 
 static int request_set_gpio(struct stepper_priv *priv, GPIO pin, int value)
@@ -285,7 +345,7 @@ static int request_set_gpio(struct stepper_priv *priv, GPIO pin, int value)
 	if (!priv->gpio_requested[pin]) {  /* only request if we don't already have it */
 		ret = gpio_request(pin, NULL);
 		if (ret)
-			printk(KERN_INFO "Can't request gpio pin %d\n", pin);
+			printk(KERN_ERR "pwm-stepper Can't request gpio pin %d\n", pin);
 		else {
 			gpio_direction_output(pin, value & 1);
 			priv->gpio_requested[pin] = 1;
@@ -294,27 +354,156 @@ static int request_set_gpio(struct stepper_priv *priv, GPIO pin, int value)
 	return ret;
 	}
 
-static irqreturn_t bcm2835_dma_callback(int irq, void *data)
+/* fast copy 3 CB's, way faster than memcpy, roughly the same as "inline" and no reg pushes/pops */
+static noinline __naked void memcpy_cb3(struct dma_cb3 *dst, struct dma_cb3 *src, int size)
 	{
-	struct stepper_priv *priv = data;
-	unsigned long flags;
-	int cntr, pin;
+	asm volatile (
+    "    mov	ip, sp     \n"
+    "    push	{r3-r9, ip, lr, pc}\n"
+		"    ldmia  r1!, {r2-r9}     \n"
+		"    stmia  r0!, {r2-r9}     \n"
+		"    ldmia  r1!, {r2-r9}     \n"
+		"    stmia  r0!, {r2-r9}     \n"
+		"    ldmia  r1!, {r2-r9}     \n"
+		"    stmia  r0!, {r2-r9}     \n"
+    "    ldm	sp, {r3-r9, sp, pc}   \n"); 
+	}
 
-	spin_lock_irqsave(&priv->lock, flags);
-	priv->dma_regs->cs = DMA_INTERRUPT_STATUS;  /* Clear the INT flag */
-	spin_unlock_irqrestore(&priv->lock, flags);
+/* copy control blocks until source end, deleting motor, pass -1 (for del_motor) if no delete */
+#define MIN_RANGE_TIME 23  /* in 1 / PWM_FREQ units, 22 or below causes whole step at this period */
+/* retun values
+copied  deleted  action return  do after return
+0       0        Err    MIN     wait/build
+0       >MIN            0       build/combine (no copy)
+0       <MIN     Mark   deleted wait/build
+<MIN    0        Mark   copied  wait/build
+<MIN    >0       Mark   copied  wait/build
+>MIN    n/a      Mark   copied  build/combine
+*/
+static int copy_del_cbs(struct stepper_priv *priv, struct dma_cb3 *pCbs_dest, struct dma_cb3 *pCbs_src, int del_motor)
+	{
+	struct dma_cb3 *pCbs_last_copied = pCbs_src;
+	int next, half_steps = 0, range = 0, deleted = 0;
 
-	for (cntr = 0; cntr < GPIO_CONTROL_MAX; cntr++) {
-		pin = priv->step_cmd.gpios[cntr];
-		if (priv->gpio_requested[pin]) {  /* only free if we have it */
-			gpio_free(priv->step_cmd.gpios[cntr]);  /* give up GPIO pins */
-			priv->gpio_requested[pin] = 0;
+	do {  /* just copy until end */
+		next = pCbs_src->next3;  /* next pointer in linked list */
+		if (pCbs_src->motor != del_motor) {
+			if (half_steps) {
+				(pCbs_dest - 1)->range = max(range, MIN_RANGE_TIME);  /* set range on last one */
+				range = 0;
+				}
+			memcpy_cb3(pCbs_dest, pCbs_src, sizeof (*pCbs_dest));
+			pCbs_last_copied = pCbs_src;  /* keep track of last one copied so we can mark it as end */
+			range = pCbs_src->range;
+			pCbs_dest++;
+			half_steps++;
 			}
+		else {  /* skip this one */
+			deleted++;
+			range += pCbs_src->range;  /* accumulate range */
+			}
+		pCbs_src++;
+		} while (next);
+	if (half_steps) {  /* anthing copied? */
+		pCbs_last_copied->next3 = 0;  /* mark last src copied the last (in case we wait) */
+		(pCbs_dest - 1)->next3 = 0;  /* mark last dest as the last */
 		}
-	printk(KERN_INFO "Rick debug dma int complete %dms\n", (*priv->system_timer_regs - rick_debug) / 1000);
-	rick_debug = *priv->system_timer_regs;
+	else  /* nothing copied */
+		if (deleted < PWM_CBS_PER_STEP * priv->motors)  /* minimum deleted? */
+			return (PWM_CBS_PER_STEP - 1);  /* make sure caller waits */
+		else
+			return 0;
+	return half_steps / 2;  /* return full steps */
+	}
 
-	return IRQ_HANDLED;
+#define CB_RANGE_OFFSET 0
+#define range_addr src1  /* this get's set according to CB_RANGE_OFFSET above ie, 0 is src1, 1 is src2, etc */
+/* combine from priv->build_cbs and pCbs_src to run_cbs, return number of blocks combined, takes about 1800us for total of 800+214 steps */
+static int combine_dma_threads(struct stepper_priv *priv, struct dma_cb3 *pCbs_dest, struct dma_cb3 *pCbs_src1, struct dma_cb3 *pCbs_src2)
+	{
+	struct pwm_dma_data *dma_send_buf = priv->dma_send_buf;
+	u32 *p_range;
+	u32 range, next1 = (u32) pCbs_src1, next2 = (u32) pCbs_src2;  /* NOTE: either could be NULL */
+	int total1 = 0, total2 = 0, half_steps = 0, half_step_offset = pCbs_dest - (struct dma_cb3 *) priv->dma_send_buf->run_cbs;
+
+	while (next1 || next2) {  /* while either thread is active */
+		if (next1 && (total2 >= total1 || !next2)) {  /* do thread1 */
+			next1 = pCbs_src1->next3;  /* next pointer in linked list */
+			range = pCbs_src1->range;  /* save range */
+			if ((next2 && total1 + range > total2) || !next1) {
+				if (total2 >= total1)
+					pCbs_src1->range = max(total2 - total1, MIN_RANGE_TIME);  /* set for minimum if needed */
+				}
+			total1 += range;  /* keep track of total for thread1 */
+			memcpy_cb3(pCbs_dest, pCbs_src1, sizeof (*pCbs_dest));  /* do thread1 */
+			p_range = &dma_send_buf->range[half_step_offset];
+			pCbs_dest->range_addr = p_range;  /* set range addr and range */
+			*p_range = pCbs_src1->range;
+			pCbs_src1++;  /* move to next step */
+			pCbs_dest->next1 = TO_PHYS_KLUDGE((struct dma_cb1 *) pCbs_dest + 1);
+			pCbs_dest->next2 = TO_PHYS_KLUDGE((struct dma_cb1 *) pCbs_dest + 2);
+			pCbs_dest->next3 = TO_PHYS_KLUDGE((struct dma_cb1 *) pCbs_dest + 3);
+			pCbs_dest->info3 &= ~DMA_INTEN;  /* remove interupt on this one */
+			half_steps++;
+			half_step_offset++;
+			pCbs_dest++;
+			}
+		else
+			if (next2 && (total1 > total2 || !next1)) {  /* do thread2 */
+				next2 = pCbs_src2->next3;
+				range = pCbs_src2->range;
+				if ((next1 && total2 + range > total1) || !next2) {
+					if (total1 > total2)
+						pCbs_src2->range = max(total1 - total2, MIN_RANGE_TIME);  /* set for minimum if needed */
+					}
+				total2 += range;
+				memcpy_cb3(pCbs_dest, pCbs_src2, sizeof (*pCbs_dest));
+				p_range = &dma_send_buf->range[half_step_offset];
+				pCbs_dest->range_addr = p_range;  /* set range addr and range */
+				*p_range = pCbs_src2->range;
+				pCbs_src2++;  /* move to next step */
+				pCbs_dest->next1 = TO_PHYS_KLUDGE((struct dma_cb1 *) pCbs_dest + 1);
+				pCbs_dest->next2 = TO_PHYS_KLUDGE((struct dma_cb1 *) pCbs_dest + 2);
+				pCbs_dest->next3 = TO_PHYS_KLUDGE((struct dma_cb1 *) pCbs_dest + 3);
+				pCbs_dest->info3 &= ~DMA_INTEN;  /* remove interupt on this one */
+				half_steps++;
+				half_step_offset++;
+				pCbs_dest++;
+				}
+		if (pCbs_dest >= (struct dma_cb3 *) priv->dma_buf_end) {
+			printk(KERN_ERR "pwm-stepper Exceeding size of max steps\n");
+			return -1;
+			}
+//		PRINTI("pwm-stepper debug total1 = %d, total2 = %d, range = %d, next1 = 0x%x, next2 = 0x%x\n", total1, total2, range, next1, next2);
+		}
+	(--pCbs_dest)->info3 |= DMA_INTEN;  /* enable interupt on last one */
+	pCbs_dest->next3 = 0;  /* mark last one as the last */
+	priv->cur_buf_end = (struct dma_cb1 *) pCbs_dest;  /* save end */
+	return half_steps / 2;  /* return steps */
+	}
+
+static void setup_pwm(struct stepper_priv *priv)
+	{
+	struct S_PWM_REGS *pwm_regs = priv->pwm_regs;
+
+	/* Set up PWM */
+	pwm_regs->control.ctl = 0;  /* reset PWM */
+	udelay(10);
+
+	pwm_regs->sta = -1;
+	udelay(10);
+
+	/* enable PWM DMA, raise panic and dreq thresholds to 1 NOTE: setting DREQ(X) will causse
+(X+3)/2 glitch cycles (~650 KHz) to come out before our waveform starts */
+	pwm_regs->dmac = PWM_DMAC_ENAB | PWM_DMAC_PANIC(15) | PWM_DMAC_DREQ(PWM_DMAC_DREQ_VAL);
+	udelay(10);
+
+	pwm_regs->control.ctl = PWM_CTL_CLRF1;  /* clear PWM fifo */
+	udelay(10);
+
+	/* enable PWM channel 1 and use fifo */
+	pwm_regs->control.ctl = PWM_CTL_USEF1 | PWM_CTL_MODE1 | PWM_CTL_PWEN1;
+
 	}
 
 /*
@@ -339,110 +528,160 @@ static void pwm_frequency(struct stepper_priv *priv, u32 freq)
 	priv->pwm_regs->control.ctl_bits.pwen1 = pwen1;  /* restore PWM */
 	}
 
-#define TO_PHYS_KLUDGE(x) (__pa(x) | 0xc0000000)  // be nice to get rid of this
+static void start_dma(struct stepper_priv *priv)
+	{
+	int index;
+
+	setup_pwm(priv);
+	/* we need to prime the range or we end up with the previous range from the last transfer for the 1st step */
+//	PRINTI("pwm-stepper debug 1st Range = 0x%x\n", priv->dma_send_buf->run_cbs[CB_RANGE_OFFSET].range);
+	priv->pwm_regs->rng1 = priv->dma_send_buf->run_cbs[CB_RANGE_OFFSET].range;
+/* to get rid of glitch cycles, prime the PWM FIFO with some cycles */
+
+	for (index = 0; index < PWM_DMAC_DREQ_VAL + 2; index++)  /* -1: 2 glitches,
+				+ 0: 1 glitch, + 1 gives one glitch but correct timing,
+				+ 2 is perfect, + 3: 1st step 2x long, + 5: 4x long */
+		priv->pwm_regs->fif1 = 0;
+
+	priv->dma_regs->conblk_ad = (int) (priv->dma_send_buf);  /* set start of CB */
+	priv->dma_regs->cs = DMA_WAIT_ON_WRITES | DMA_PANIC_PRIORITY(8) |
+		DMA_PRIORITY(8) | DMA_ACTIVE;  /* start DMA */
+		priv->timer_save = *priv->system_timer_regs;  /* save current timer */
+//	PRINTI("pwm-stepper debug step_cmd_write end %d us\n", timer);
+	}
+
 /* build control block, see page 42 of rpi_DATA_2711_1p0.pdf */
-#define BUILD_CB(inf, source, dest)							\
+#define BUILD_CB(inf, source, dest, indx, mtr) \
 	pCbs->info = inf;	\
 	pCbs->src = (int) source;	\
 	pCbs->dst = (dest) & PERI_DMA_MASK;	\
 	pCbs->length = 4;	\
 	pCbs->stride = 0;	\
 	pCbs->next = TO_PHYS_KLUDGE(pCbs + 1);	\
+	pCbs->motor = mtr;  /* use unused spot to keep track of motor */ \
+	pCbs->index = indx;  /* use unused spot to keep track of index */ \
 	pCbs++
 
-/* build DMA control block */
-static struct bcm2708_dma_cb *build1pulse(struct stepper_priv *priv, struct bcm2708_dma_cb *pCbs, int index, int half_period)
+/* build DMA control block, NOTE: the ordering of the steps below is really important */
+static inline struct dma_cb1 *build1step(struct stepper_priv *priv, struct dma_cb1 *pCbs, int step, u32 half_period, int motor, BUILDTYPE flag)
 	{  /* half the period for high and low half-cycles */
-	struct pwm_dma_data *dma_send_buf_phys = priv->dma_send_buf_phys;
-//	printk(KERN_INFO "Rick debug build1pulse dx=%d period=%d\n", index, half_period * 2);
-	priv->dma_send_buf->range[index] = half_period;
+	struct pwm_dma_data *dma_send_buf = priv->dma_send_buf;
+	int *p_step_gpio_mask = &dma_send_buf->step_gpio_mask[motor];
+	u32 *p_range = &dma_send_buf->range[step * 2];
+	int cb_dx = 0;  /* DMA block index */
 
-	/* Set GPIO high */
-	BUILD_CB(NORMAL_DMA, &dma_send_buf_phys->gpio_val, GPIO_BASE + GPSET0 * 4);
+//	PRINTI("pwm-stepper debug build1step dx=%d period=%d\n", index, half_period * 2);
+	if (flag == USE_DMA_BUF)  /* don't write to range if not a DMA buf build, it will get written during combine */
+		*p_range = half_period;
+	/* NOTE: CB_RANGE_OFFSET gets set based on the ordering below, set to the relative positioning of the Range write */
+	pCbs->range = half_period;  /* save our delay in a secret spot (->src1 in cb3) */
   /* set range on PWM for half_period */
-	BUILD_CB(NORMAL_DMA, &dma_send_buf_phys->range[index], PWM_BASE + PWM_RNG1 * 4);
+	BUILD_CB(NORMAL_DMA, p_range++, PWM_BASE + PWM_RNG1 * 4, cb_dx++, motor);
   /* delay, half_period range amount via PWM */
-	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), &dma_send_buf_phys->gpio_val, PWM_BASE + PWM_FIFO1 * 4);
+	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), p_step_gpio_mask, PWM_BASE + PWM_FIFO1 * 4, cb_dx++, motor);
+	/* Set GPIO high */
+	BUILD_CB(NORMAL_DMA, p_step_gpio_mask, GPIO_BASE + GPSET0 * 4, cb_dx++, motor);
 	/* Same as above 3 except Set GPIO low */
-	BUILD_CB(NORMAL_DMA, &dma_send_buf_phys->gpio_val, GPIO_BASE + GPCLR0 * 4);
-	BUILD_CB(NORMAL_DMA, &dma_send_buf_phys->range[index], PWM_BASE + PWM_RNG1 * 4);
-	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), &dma_send_buf_phys->gpio_val, PWM_BASE + PWM_FIFO1 * 4);
+	if (flag == USE_DMA_BUF)
+		*p_range = half_period;
+	pCbs->range = half_period;
+	BUILD_CB(NORMAL_DMA, p_range, PWM_BASE + PWM_RNG1 * 4, cb_dx++, motor);
+	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), p_step_gpio_mask, PWM_BASE + PWM_FIFO1 * 4, cb_dx++, motor);
+	BUILD_CB(NORMAL_DMA, p_step_gpio_mask, GPIO_BASE + GPCLR0 * 4, cb_dx++, motor);
 
 	return (pCbs);
 	}
 
-/* build DMA control blocks and start DMA */
-static int stepper_transfer_dma(struct stepper_priv *priv)
+/* build DMA control blocks, pass in destination pCB, returns number of steps built or 0 */
+static int build_dma_thread(struct stepper_priv *priv, BUILDTYPE flag)
 	{
-	int limit, cntr, up_index, index = 0, freq, diff;
-	struct bcm2708_dma_cb *pCbs = priv->dma_send_buf->cbs;  /* pointer to DMA control block */
+	int limit, cntr, up_index, steps = 0, freq, diff;
+	struct STEPPER_SETUP *p_cmd = &priv->step_cmd;
+	int motor = priv->gpio2motor[p_cmd->gpios[GPIO_STEP]];
+	struct dma_cb1 *pCbs, *pCbs_reverse;
+	int distance = abs(p_cmd->distance);
 
-	pCbs = priv->dma_send_buf->cbs;  /* pointer to DMA control block */
-
+	if (flag == USE_DMA_BUF)
+		pCbs = priv->dma_send_buf->run_cbs;
+	else
+		pCbs = priv->build_cbs;
+		
 	/* do UP ramp, First go 1/2 the UP ramp: can't exceed 1/4
 		 the distance and can't go over 1/2 max speed */
-	freq = priv->step_cmd.min_speed;  /* start off freq */
-	diff = priv->step_cmd.ramp_aggressiveness;  /* base 1st diff on ramp_aggressiveness */
-	limit = priv->step_cmd.min_speed + (priv->step_cmd.max_speed - priv->step_cmd.min_speed) / 2;
+	freq = p_cmd->min_speed;  /* start off freq */
+	diff = p_cmd->ramp_aggressiveness;  /* base 1st diff on ramp_aggressiveness */
+	limit = p_cmd->min_speed + (p_cmd->max_speed - p_cmd->min_speed) / 2;
 	do {
-		pCbs = build1pulse(priv, pCbs, index++, PWM_FREQ / freq / 2);
+		pCbs = build1step(priv, pCbs, steps++, PWM_FREQ / freq / 2, motor, flag);
 		freq += diff / DIFF_SCALE;
-		diff += priv->step_cmd.ramp_aggressiveness;
+		diff += p_cmd->ramp_aggressiveness;
 		}
-	while (freq <= limit && index < priv->step_cmd.distance / 4);
+	while (freq <= limit && steps < distance / 4);
 	
-	diff -= priv->step_cmd.ramp_aggressiveness;  /* roll back from last time through above loop */
+	diff -= p_cmd->ramp_aggressiveness;  /* roll back from last time through above loop */
 	freq -= diff / DIFF_SCALE;
-	diff -= priv->step_cmd.ramp_aggressiveness + 2;  /* prepare for next loop */
+	diff -= p_cmd->ramp_aggressiveness + 2;  /* prepare for next loop */
 	freq += diff / DIFF_SCALE;
 
-	printk(KERN_INFO "Rick debug 1/4 UP index = %d, freq = %d, distance = %d speed = %d, aggr = %d\n", index, freq, priv->step_cmd.distance, priv->step_cmd.max_speed, priv->step_cmd.ramp_aggressiveness);
+//	PRINTI("pwm-stepper debug 1/4 UP steps = %d, freq = %d, distance = %d speed = %d, aggr = %d\n", steps, freq, distance, p_cmd->max_speed, p_cmd->ramp_aggressiveness);
 	/* Do 2nd half of UP ramp */
 	do {
-		pCbs = build1pulse(priv, pCbs, index++, PWM_FREQ / freq / 2);
+		pCbs = build1step(priv, pCbs, steps++, PWM_FREQ / freq / 2, motor, flag);
 		freq += diff / DIFF_SCALE;
-		diff -= priv->step_cmd.ramp_aggressiveness;
+		diff -= p_cmd->ramp_aggressiveness;
 		if (diff < DIFF_SCALE)
 			diff += DIFF_SCALE;  /* can't let diff go below scale */
-//		printk(KERN_INFO "Rick debug 2nd half of UP index = %d, diff = %d, freq = %d\n", index, diff, freq);
+//		PRINTI("pwm-stepper debug 2nd half of UP steps = %d, diff = %d, freq = %d\n", steps, diff, freq);
 		}
-	while (freq <= priv->step_cmd.max_speed && index < priv->step_cmd.distance / 2);
+	while (freq <= p_cmd->max_speed && steps < distance / 2);
 		
-	up_index = index;  /* save index for ramp down */
-	printk(KERN_INFO "Rick debug UP index = %d, freq = %d, distance = %d speed = %d, aggr = %d\n", index, freq, priv->step_cmd.distance, priv->step_cmd.max_speed, priv->step_cmd.ramp_aggressiveness);
+	up_index = steps;  /* save steps for ramp down */
+//	PRINTI("pwm-stepper debug UP steps = %d, freq = %d, distance = %d speed = %d, aggr = %d\n", steps, freq, distance, p_cmd->max_speed, p_cmd->ramp_aggressiveness);
 
 	/* hold steady at max speed */
-	if (freq > priv->step_cmd.max_speed)
-		freq = priv->step_cmd.max_speed;
-	for (cntr = priv->step_cmd.distance - index * 2; cntr > 0; cntr--) {
-		pCbs = build1pulse(priv, pCbs, index++, PWM_FREQ / freq / 2);
+	if (freq > p_cmd->max_speed)
+		freq = p_cmd->max_speed;
+	for (cntr = distance - steps * 2; cntr > 0; cntr--) {
+		pCbs = build1step(priv, pCbs, steps++, PWM_FREQ / freq / 2, motor, flag);
 		}
 
-	printk(KERN_INFO "Rick debug SP index = %d\n", index);
+//	PRINTI("pwm-stepper debug SP steps = %d\n", steps);
 	/* ramp down, just feed ramp up in reverse */
-	while (up_index--) {
-		pCbs = build1pulse(priv, pCbs, index++, priv->dma_send_buf->range[up_index]);
-		//			printk(KERN_INFO "Rick debug DN 0x%08x\n");
+	for (pCbs_reverse = pCbs - PWM_CBS_PER_STEP; up_index--; pCbs_reverse -= PWM_CBS_PER_STEP) {
+		pCbs = build1step(priv, pCbs, steps++, pCbs_reverse->range, motor, flag);
+		//			PRINTI("pwm-stepper debug DN 0x%08x\n");
 		}
 	(--pCbs)->next = 0;  /* mark last one as the last */
 	pCbs->info |= DMA_INTEN;  /* enable interupt on last one */
-	printk(KERN_INFO "Rick debug DN index = %d\n", index);
+//	PRINTI("pwm-stepper debug DN steps = %d\n", steps);
 
-//	printk(KERN_INFO "Rick debug stepper_dma_start %d\n", *priv->system_timer_regs - rick_debug);
-	rick_debug = *priv->system_timer_regs;
+//	PRINTI("pwm-stepper debug dma_send_buf = 0x%x __pa 0x%x dma = 0x%x\n", (int) priv->dma_send_buf, (int) __pa(priv->dma_send_buf), priv->dma_regs->conblk_ad);
+	return steps;
+	}
 
-	priv->dma_regs->conblk_ad = (int) (priv->dma_send_buf_phys);  /* set start of CB */
-//	printk(KERN_INFO "Rick debug dma_send_buf = 0x%x __pa 0x%x dma = 0x%x\n", (int) priv->dma_send_buf, (int) __pa(priv->dma_send_buf), priv->dma_regs->conblk_ad);
+/* set the microstep and direction GPIO's */
+static void set_gpios(struct stepper_priv *priv)
+	{
+	struct STEPPER_SETUP *p_cmd = &priv->step_cmd;
 
-	/* to get rid of glitch cycles, prime the PWM FIFO with some cycles */
-	for (index = 0; index < PWM_DMAC_DREQ_VAL + 2; index++)  /* -1: 2 glitches,
-				+ 0: 1 glitch, + 1 gives one glitch but correct timing,
-				+ 2 is perfect, + 3: 1st pulse 2x long, + 5: 4x long */
-		priv->pwm_regs->fif1 = 0;
+	gpio_direction_output(p_cmd->gpios[GPIO_MICROSTEP0], p_cmd->microstep_control >> 0);
+	gpio_direction_output(p_cmd->gpios[GPIO_MICROSTEP1], p_cmd->microstep_control >> 1);
+	gpio_direction_output(p_cmd->gpios[GPIO_MICROSTEP2], p_cmd->microstep_control >> 2);
+	gpio_direction_output(p_cmd->gpios[GPIO_DIRECTION], p_cmd->distance >= 0 ? 1 : 0);
+	}
 
-	priv->dma_regs->cs = DMA_WAIT_ON_WRITES | DMA_PANIC_PRIORITY(8) |
-		DMA_PRIORITY(8) | DMA_ACTIVE;  /* start DMA */
-	return 0;
+static irqreturn_t bcm2835_dma_callback(int irq, void *data)
+	{
+	struct stepper_priv *priv = data;
+
+	if (priv->pwm_regs->sta & 0x1fc)
+		printk(KERN_ERR "pwm-stepper Error PWM STA = 0x%x\n", priv->pwm_regs->sta);
+
+	priv->dma_regs->cs |= DMA_INTERRUPT_STATUS;  /* Clear the INT flag */
+	PRINTI("pwm-stepper debug dma int complete %dms\n", (*priv->system_timer_regs - priv->timer_save) / 1000);
+	complete(&priv->dma_cmpl);
+
+	return IRQ_HANDLED;
 	}
 
 static ssize_t step_cmd_read(struct file *filp, struct kobject *kobj,
@@ -452,68 +691,151 @@ static ssize_t step_cmd_read(struct file *filp, struct kobject *kobj,
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct stepper_priv *priv = dev_get_drvdata(dev);
 
-	priv->step_cmd.status = priv->dma_regs->cs;  /* get status */
-	memcpy(buffer, &priv->step_cmd, sizeof(priv->step_cmd));
-	printk(KERN_INFO "Rick debug statu = 0x%x, size = %d\n", priv->dma_regs->cs, sizeof(priv->step_cmd));
-	return sizeof(priv->step_cmd);
+	priv->step_cmd_read.status = priv->dma_regs->cs;  /* get status */
+	memcpy(buffer, &priv->step_cmd_read, sizeof(priv->step_cmd_read));
+//	PRINTI("pwm-stepper debug status = 0x%x, size = %d\n", priv->dma_regs->cs, sizeof(priv->step_cmd_read));
+	return sizeof(priv->step_cmd_read);
 	}
 
-/* get command from user */
+#define DMA_CMPL_TIMEOUT 2000  /* in ms */
+/* check if are still doing a DMA, wait else build and start DMA */
+static size_t wait_build(struct stepper_priv *priv, size_t count)
+	{
+	volatile struct S_DMA_REGS *dma_regs = priv->dma_regs;
+	int steps;
+
+	if (priv->step_cmd.wait_timeout && dma_regs->cs & DMA_ACTIVE &&
+		dma_regs->conblk_ad) {  /* still doing a DMA? */
+//		PRINTI("pwm-stepper waiting for DMA interrupt\n");
+		reinit_completion(&priv->dma_cmpl);
+		if (!wait_for_completion_timeout(&priv->dma_cmpl,
+				msecs_to_jiffies(priv->step_cmd.wait_timeout))) {
+			printk(KERN_ERR "pwm-stepper timeout waiting for DMA interrupt, aborting\n");
+			priv->dma_regs->cs = DMA_CHANNEL_ABORT;
+			return -ETIMEDOUT;
+			}
+//		PRINTI("pwm-stepper done waiting for DMA interrupt\n");
+		}
+	set_gpios(priv);  /* only set GPIO's after wait */
+	if ((steps = build_dma_thread(priv, USE_DMA_BUF))) { /* build to real DMA area */
+		priv->cur_buf_end = priv->dma_send_buf->run_cbs + steps * PWM_CBS_PER_STEP;  /* save end, NOTE: the build to non DMA buffer won't be used */
+		start_dma(priv);
+		}
+	return count;
+	}
+
+int rick_debug3 = 0; /* keep track of time for debug */
+#define report_debug(num) \
+	PRINTI("pwm-stepper debug " num " cur_buf_end = 0x%x pCbs3 = 0x%x conblk = 0x%x cs = 0x%x index = %d\n", (int) priv->cur_buf_end, (int) pCbs3, (int) dma_regs->conblk_ad, (int) dma_regs->cs, pCbs->index); \
+	PRINTI("pwm-stepper debug copy/build/combine steps = %d %d %d delay CB's =%d\n", (int) copy_steps, (int) build_steps, (int) combine_steps, (int) cntr); \
+	PRINTI("pwm-stepper debug timing actual: copy+build %dus combine %dus, est: combine = %dus (%d percent)\n", \
+    timer_save, \
+	  *priv->system_timer_regs - rick_debug3, \
+	  (int) range_ticks / (PWM_FREQ / 1000000), \
+	  (int) (range_ticks / (PWM_FREQ / 1000000)) * 100 / (*priv->system_timer_regs - rick_debug3))
+
+/* take a command from user space, if we are not currently doing a DMA to a motor, just start a new DMA.  If we are already doing a DMA, find out where our current trasfer is (via conblk_ad) and calcuate how far we should move ahead, knowing how long it takes us to copy/build/combine, then start the combine at that point. */
 static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 				struct bin_attribute *bin_attr,
 				char *buffer, loff_t pos, size_t count)
 	{
-	int ret;
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct stepper_priv *priv = dev_get_drvdata(dev);
-	struct S_PWM_REGS *pwm_regs = priv->pwm_regs;
-	int timer = *priv->system_timer_regs;
-	
-	memcpy(&priv->step_cmd, buffer, count);
-	printk(KERN_INFO "Rick debug microstep_control = %d, step = %d\n", priv->step_cmd.microstep_control, priv->step_cmd.gpios[GPIO_STEP]);
+	volatile struct S_DMA_REGS *dma_regs = priv->dma_regs;
+	struct dma_cb1 *pCbs;  /* pointer to DMA control block */
+	struct dma_cb3 *pCbs3, *pCbs3_start, *pCbs3_build;  /* pointer to DMA control block triplet */
+	struct STEPPER_SETUP *p_cmd = &priv->step_cmd;
+	int timer_save, range_ticks, ticks, ret, cntr, copy_steps = 0, build_steps = 0, combine_steps = 0;
 
-	/* Setting the GPIO pins */
-	ret = request_set_gpio(priv, priv->step_cmd.gpios[GPIO_MICROSTEP0], priv->step_cmd.microstep_control >> 0);
-	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_MICROSTEP1], priv->step_cmd.microstep_control >> 1);
-	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_MICROSTEP2], priv->step_cmd.microstep_control >> 2);
-	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_DIRECTION], priv->step_cmd.distance >= 0 ? 1 : 0);
-	priv->step_cmd.distance = abs(priv->step_cmd.distance);
-	ret |= request_set_gpio(priv, priv->step_cmd.gpios[GPIO_STEP], 0);
-	if (ret)
-		return -EBUSY;
+	memcpy(p_cmd, buffer, count);  /* insert this command */
+	if (!p_cmd->combine_ticks_per_step)  /* sanity check */
+		p_cmd->combine_ticks_per_step = COMBINE_TICKS_PER_STEP;
 
-	/* Set up PWM */
-	pwm_regs->control.ctl = 0;  /* reset PWM */
-	udelay(10);
-
-	pwm_regs->sta = -1;
-	udelay(10);
-
-	/* enable PWM DMA, raise panic and dreq thresholds to 1 NOTE: setting DREQ(X) will causse
-(X+3)/2 glitch cycles (~650 KHz) to come out before our waveform starts */
-	pwm_regs->dmac = PWM_DMAC_ENAB | PWM_DMAC_PANIC(15) | PWM_DMAC_DREQ(PWM_DMAC_DREQ_VAL);
-	udelay(10);
-
-	pwm_regs->control.ctl = PWM_CTL_CLRF1;  /* clear PWM fifo */
-	udelay(10);
-
-	/* enable PWM channel 1 and use fifo */
-	pwm_regs->control.ctl = PWM_CTL_USEF1 | PWM_CTL_MODE1 | PWM_CTL_PWEN1;
-
-	if (priv->dma_regs->conblk_ad)  { // busy? debug only, won't need if abort works below
-		priv->dma_regs->cs = DMA_CHANNEL_ABORT;
-		printk(KERN_ERR "Rick pwm-stepper: DMA busy, aborting\n");
-//		return -EBUSY;
+	if (priv->gpio2motor[p_cmd->gpios[GPIO_STEP]] == NO_MOTOR)
+		{  /* this is a new motor request gpio's */
+		priv->dma_send_buf->step_gpio_mask[priv->motors] = 1 << p_cmd->gpios[GPIO_STEP];  /* set our step GPIO */
+		priv->gpio2motor[p_cmd->gpios[GPIO_STEP]] = priv->motors++;  /* set this motor */
+		/* Set the GPIO pins */
+//		PRINTI("pwm-stepper debug microstep_control = %d, step = %d, motor = %d\n", p_cmd->microstep_control, p_cmd->gpios[GPIO_STEP], priv->gpio2motor[p_cmd->gpios[GPIO_STEP]]);
+		ret = request_set_gpio(priv, p_cmd->gpios[GPIO_MICROSTEP0], p_cmd->microstep_control >> 0);
+		ret |= request_set_gpio(priv, p_cmd->gpios[GPIO_MICROSTEP1], p_cmd->microstep_control >> 1);
+		ret |= request_set_gpio(priv, p_cmd->gpios[GPIO_MICROSTEP2], p_cmd->microstep_control >> 2);
+		ret |= request_set_gpio(priv, p_cmd->gpios[GPIO_DIRECTION], p_cmd->distance >= 0 ? 1 : 0);
+		ret |= request_set_gpio(priv, p_cmd->gpios[GPIO_STEP], 0);
+		if (ret) {
+			printk(KERN_ERR "pwm-stepper Requesting GPIO's that are already used\n");
+			return -EBUSY;
+			}
 		}
-	rick_debug = *priv->system_timer_regs;  /* save current timer */
-
-	printk(KERN_INFO "Rick debug chan = %d: dma ADDR = 0x%x, handle = 0x%x\n", priv->dma_chan_tx->chan_id, (int) priv->dma_regs, (int) priv->dma_handle);
-
-	priv->dma_send_buf->gpio_val = 1 << priv->step_cmd.gpios[GPIO_STEP];  /* set our step GPIO */
-	pwm_frequency(priv, PWM_FREQ);
-	stepper_transfer_dma(priv);
-	timer = *priv->system_timer_regs - timer;
-	printk(KERN_INFO "Rick debug step_cmd_write end %d us\n", timer);
+	if (abs(p_cmd->distance) > MAX_STEPS) {
+		printk(KERN_ERR "pwm-stepper Exceeding size of max steps\n");
+		return -EINVAL;
+		}
+	pCbs = (struct dma_cb1 *) dma_regs->conblk_ad;  /* pointer to DMA control block */
+	if (dma_regs->cs & DMA_ACTIVE && pCbs) {  /* still doing a DMA? */
+		timer_save = *priv->system_timer_regs;  /* save current timer */
+		for (; pCbs->index != 0 && pCbs->next &&  /* first find 1st of 6 CB's */
+					 pCbs < priv->cur_buf_end; pCbs++)
+			;
+		if (pCbs->index || pCbs >= priv->cur_buf_end || !pCbs->next) {  /* are we not at the 1st control block? */
+			report_debug("2");
+			printk(KERN_ERR "pwm-stepper error: didn't first find 1st of 6 CB's\n");
+			return (wait_build(priv, count));
+			}
+		pCbs3_start = pCbs3 = (struct dma_cb3 *) pCbs;  /* switch to looking at half steps */
+		copy_steps = copy_del_cbs(priv, priv->copy_cbs, pCbs3,
+			priv->gpio2motor[p_cmd->gpios[GPIO_STEP]]);
+		if (copy_steps && copy_steps < PWM_CBS_PER_STEP * priv->motors) {  /* needs to be a minimum amount */
+			report_debug("0");
+			printk(KERN_ERR "pwm-stepper didn't pass minimum amount test copy_steps=%d\n", copy_steps);
+			return (wait_build(priv, count));
+			}
+		build_steps = build_dma_thread(priv, USE_BUILD_BUF);
+		/* calc range offset by adding the real time it took to copy/build plus a guess at combine */
+		rick_debug3 = *priv->system_timer_regs;  /* save current timer for real combine time */
+		timer_save = *priv->system_timer_regs - timer_save;  /* save time for copy/build */
+		range_ticks = timer_save * (PWM_FREQ / 1000000) +
+			p_cmd->combine_ticks_per_step * (copy_steps + build_steps);
+		for (ticks = 0, cntr = 0; pCbs3->next3 &&  /* find our delay point, at least one CB */
+					 pCbs3 < (struct dma_cb3 *) priv->cur_buf_end; cntr++, pCbs3++) {
+			if (ticks >= range_ticks)
+				break;
+			ticks += pCbs3->range;
+			}
+		if (ticks < range_ticks || !pCbs3->next3) {  /* didn't reach our delay point? */
+			printk(KERN_ERR "pwm-stepper didn't reach our delay point ticks=%d range_ticks=%d pCbs3->next3=0x%x increase COMBINE_TICKS_PER_STEP\n",
+				(int) ticks, (int) range_ticks, (int) pCbs3->next3);
+			report_debug("3");
+			return (wait_build(priv, count));
+			}
+		if (copy_steps)  /* anything copied? */
+			pCbs3_start = (struct dma_cb3 *)priv->copy_cbs + (pCbs3 - pCbs3_start);
+		else
+			pCbs3_start = NULL;
+		if (build_steps)  /* anything built? */
+			pCbs3_build = (struct dma_cb3 *)priv->build_cbs;
+		else
+			pCbs3_build = NULL;
+		set_gpios(priv);  /* set GPIO's as close to combine (this should really be in the DMA stream) */
+		combine_steps = combine_dma_threads(priv, pCbs3, pCbs3_start, pCbs3_build);
+		if (combine_steps > 0) {  /* did combine work? */
+			if (pCbs3 < (struct dma_cb3 *) dma_regs->conblk_ad ||  /* has DMA advanced passed where we did combine? */
+				  !(dma_regs->cs & DMA_ACTIVE && dma_regs->conblk_ad)) {  /* not still doing a DMA? */
+				report_debug("6");
+				printk(KERN_ERR "pwm-stepper took too long to copy/build/combine\n");
+				return -EINVAL;  /* error */
+				}
+			}
+		else {
+			report_debug("5");
+			printk(KERN_ERR "pwm-stepper combine error\n");
+			return -EINVAL;  /* error */
+			}
+		report_debug("G");
+		}
+	else {  /* not currently doing a DMA */
+		return (wait_build(priv, count));
+		}
 	return count;
 	}
 
@@ -532,18 +854,19 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret = 0;
 
-	printk(KERN_INFO "Rick debug Inserting stepper_driver module\n");
-
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
+	if (!priv) {
+		printk(KERN_ERR "pwm-stepper: priv alloc failed, decrease MAX_STEPS\n");
 		return -ENOMEM;
-
+		}
+	init_completion(&priv->dma_cmpl);
+	memset(priv->gpio2motor, NO_MOTOR, sizeof(priv->gpio2motor));  /* set to No Motor */
 	platform_set_drvdata(pdev, priv);
 	priv->pdev = pdev;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	priv->base = devm_ioremap_resource(dev, res);
-	printk(KERN_INFO "Rick debug PWM base from DT = 0x%x\n", (int) res);
+//	PRINTI("pwm-stepper debug PWM base from DT = 0x%x\n", (int) res);
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
@@ -562,7 +885,7 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 
 	ret = sysfs_create_bin_file(&pdev->dev.kobj, &step_cmd_attr);
 	if (ret) {
-		printk(KERN_ERR "Rick pwm-stepper: Failed to create sysfs files\n");
+		printk(KERN_ERR "pwm-stepper: Failed to create sysfs files\n");
 		goto out5;
 	}
 
@@ -575,7 +898,7 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 	priv->gpio_regs = (struct S_GPIO_REGS *)ioremap(GPIO_BASE, sizeof(struct S_GPIO_REGS));
 	if(!priv->gpio_regs || !priv->pwm_regs || !priv->pwm_clk_regs || !priv->dma_regs)
 		{
-		printk(KERN_ERR "Rick pwm-stepper: failed to ioremap.\n");
+		printk(KERN_ERR "pwm-stepper: failed to ioremap\n");
 		ret = -ENOMEM;
 		goto out4;
 		}
@@ -586,19 +909,20 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 	priv->dma_regs = &priv->dma_regs[priv->bcm2835_chan->ch];  /* move to our reg's */
 	/* steal the interrupt for this channel */
 	if (request_irq(priv->irq_number, bcm2835_dma_callback, 0, "Stepper DMA IRQ", priv)) {
-		printk(KERN_ERR "Rick request_irq failed\n");
+		printk(KERN_ERR "pwm-stepper request_irq failed\n");
 		goto out4;
 		}
 	/* preallocate dma buffers */
 	priv->dma_size = sizeof(struct pwm_dma_data);
 	priv->dma_send_buf = dma_alloc_coherent(dev, priv->dma_size,
 		&priv->dma_handle, GFP_KERNEL | GFP_DMA);
+	priv->dma_buf_end = &priv->dma_send_buf->run_cbs[PWM_MAX_CBS];  /* end for check */
+	PRINTI("pwm-stepper debug Inserting stepper_driver module dma_handle = 0x%x, priv alloc = %d, dma buf alloc = %d\n", (int) priv->dma_handle, sizeof(*priv), priv->dma_size);
 	if (!priv->dma_send_buf) {
-		printk(KERN_ERR "Rick stepper: kmalloc failed\n");
+		printk(KERN_ERR "pwm-stepper: dma buf alloc failed, decrease MAX_STEPS\n");
 		return -ENOMEM;
 		}
-	priv->dma_send_buf_phys = (struct pwm_dma_data *) (int) priv->dma_handle;
-
+	pwm_frequency(priv, PWM_FREQ);
 	return 0;
 
 out4:
@@ -619,14 +943,13 @@ static int bcm2835_pwm_remove(struct platform_device *pdev)
 	dmaengine_terminate_all(priv->dma_chan_tx);
 	sysfs_remove_bin_file(&pdev->dev.kobj, &step_cmd_attr);
 	free_irq(priv->irq_number, priv);  /* free our int and put his back */
-	ret = request_irq(priv->irq_number, bcm2835_dma_callback, 0, "Stepper DMA IRQ", priv->bcm2835_chan);
 	dma_release_channel(priv->dma_chan_tx);
 	clk_disable_unprepare(priv->clk);
 	dma_free_coherent(&pdev->dev, priv->dma_size, priv->dma_send_buf, priv->dma_handle); 
 	kfree(priv);
-	printk(KERN_INFO "Rick debug bcm2835_pwm_remove 3\n");
-// 	platform_device_unregister(pdev); // hangs, never returns from:  c078d00c:	eb0c0ad8 	bl	c0a8fb74 <mutex_lock>
-	printk(KERN_INFO "Rick debug bcm2835_pwm_remove 4\n");
+	PRINTI("pwm-stepper debug bcm2835_pwm_remove 3\n");
+ 	platform_device_unregister(pdev); // hangs, never returns from <mutex_lock>
+	PRINTI("pwm-stepper debug bcm2835_pwm_remove 4\n");
 	return ret;
 }
 

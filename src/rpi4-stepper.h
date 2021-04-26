@@ -101,10 +101,14 @@ struct STEPPER_SETUP
  */
 	RAMP ramp_aggressiveness;  /* 0 = 1/2 ramp up/down 1=1/3, 2=1/4, 3=1/5, etc */
 	GPIO gpios[GPIO_CONTROL_MAX];  /* any GPIO */
+	u32 wait_timeout;  /* how long (in ms) to wait if below the minimum time to combine, if 0 then don't wait */
+	u32 combine_ticks_per_step;  /* sets the number of ticks (1/PWM_FREQ) to build one step in the combine routine, see default below */
 	u32 status;  /* upon read, shows the control status register of the DMA, see page 52 of rpi_DATA_2711_1p0.pdf  */
 	};
 
-#define MAX_STEPS (128 * 1024)
+#define MAX_MOTORS 4 /* max number of motors we'll drive */
+#define MAX_STEPS 10000  // 12000 fails priv alloc
 #define DIFF_SCALE (1 << 8)  /* divisor used for aggressiveness, lower bits treated as fraction */
 #define RPI4_CRYSTAL_FREQ 54000000
 #define PWM_FREQ (RPI4_CRYSTAL_FREQ / 2)  /* set for max granularity */
+#define COMBINE_TICKS_PER_STEP (PWM_FREQ / 400000)  /* gotten by trial and error */

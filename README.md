@@ -16,6 +16,10 @@ Features
 - Driver smoothly ramps motor up to max speed and back down again based on a (approximate) sinusoidal curve
 - Drive multiple motors (future)
 
+Constraints
+- Minimum time between any two GPIO's (can be different GPIO's or the same) pulse edges is 500ns, this seems to be a constraint of the DMA
+- Maximum number of steps is hardcoded as MAX_STEPS in rpi4-stepper.h.  Note that if the DMA is stilll streaming to motor and you ask to move motor 2, it ADD's onto the existing DMA stream.
+
 Untested
 - Only tested on RPI-4
 - Multiple motors untested
