@@ -1,4 +1,4 @@
-  RPI Stepper Motor Linux Kernel Driver
+  Raspberry PI 4 Stepper Motor Linux Kernel Driver
 ==========================================
 
 This is everything you need to build a stepper motor driver for the Raspberry PI 4 that is a real Linux kernel module.
