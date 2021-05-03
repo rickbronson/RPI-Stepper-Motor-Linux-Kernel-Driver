@@ -231,7 +231,7 @@ struct STEPPER_SETUP setup[] =
 
 #define MAP_SIZE 4096UL
 #define MAP_MASK (MAP_SIZE - 1)
-static int map_read_mem(off_t addr)
+static volatile int map_read_mem(off_t addr)
   {
   void *map_base, *virt_addr; 
   int fd, retval;
@@ -432,7 +432,7 @@ int main(int argc,char **argv) {
 			exit(1);
 			}
 		system_timer_regs = map_read_mem(SYSTEM_TIMER_CLO) - system_timer_regs;
-		printf("write time = %d us\n", system_timer_regs);
+		printf("write time = %d us 0x%x\n", system_timer_regs, map_read_mem(SYSTEM_TIMER_CLO));
 		/* delay in milliseconds */
 		ts.tv_nsec = (msdelay % 1000) * 1000 * 1000;
 		ts.tv_sec = msdelay / 1000;

@@ -93,9 +93,11 @@ typedef enum {GPIO_02 = 2,
 /* struct to send to /sys/kernel/stepper */
 struct STEPPER_SETUP
 	{
-	s32 distance;  /* in step degree increments (see microstep_control below) NOTE: signed, 
+	s32 distance;  /* in step increments (see microstep_control below) The real
+										distance will depend on the microstep control below NOTE: signed, 
 												pos = DIR pin high, neg = DIR pin low NOTE: if = 0 then stop */
-	u32 max_speed;  /* max speed in steps/second NOTE: if = 0 then stop */
+	u32 max_speed;  /* max speed in steps/second NOTE: if = 0 then stop, real speed 
+										 will depend on the microstep control below*/
 	u32 min_speed;  /* max speed in steps/second */
 	u8 microstep_control;  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, set the step mode - 0=full, 1=1/2, 2=1/4, 3=1/8/ 4=1/16, etc step. Internal pulldown.
  */

@@ -15,13 +15,13 @@ Features
 - Can use any unused GPIO's for STEP, DIRECTION, and MICROSTEP control pins
 - Driver smoothly ramps motor up to max speed and back down again based on a (approximate) sinusoidal curve
 - Drive multiple motors.
-- Can handle the same microstep control lines going to multiple motors.
+- Can handle the same microstep control lines going to multiple motors, just use the same GPIO values as the first motor.
 
 Constraints
 
 - GPIO edge granularity is 1/PWM_FREQ, about 37ns
 - Minimum time between any two GPIO edges (can be different GPIO's or the same) is about 500ns, this seems to be a constraint of the DMA
-- Driver requires a minimum amount of steps when any motor is already running. If the DMA is stilll streaming to motor 1 and you ask to move motor 2, I have to copy existing DMA control blocks (CB's), build the new motors DMA CB's and then combine them into one stream.  If the minimum is not met, I just wait until the existing stream is done.  The minimum is based on time it takes to do the copy and build plus a guess as to the time it takes to do the combine.  The fudge factor to estimate the combine time can be set via priv->step_cmd.combine_ticks_per_step
+- Driver requires a minimum amount of steps when any motor is already running. If the DMA is stilll streaming to motor 1 and you ask to move motor 2, The driver has to copy existing DMA control blocks (CB's), build the new motors DMA CB's and then combine them into one stream in the existing live DMA buffer.  If the minimum is not met, I just wait until the existing stream is done.  The minimum is based on time it takes to do the copy and build plus a guess as to the time it takes to do the combine.  The fudge factor to estimate the combine time can be set via priv->step_cmd.combine_ticks_per_step.  NOTE: If the existing DMA buffer is appended with new streams (this only happens when the current DMA is not finished) enough times you will run into the end of the DMA buffer.
 - When the minimum time cannot be satisfied then the driver will wait (or not) for the current DMA stream to finish for priv->step_cmd.wait_timeout (in milliseconds).  If this value is zero then it doesn't wait.
 - Maximum number of steps is hardcoded as MAX_STEPS in rpi4-stepper.h.  This has a big impact on the amount of alloc'd memory.
 - Max number of motors set by MAX_MOTORS.  This has a big impact on the amount of alloc'd memory.

@@ -471,7 +471,7 @@ static int combine_dma_threads(struct stepper_priv *priv, struct dma_cb3 *pCbs_d
 				pCbs_dest++;
 				}
 		if (pCbs_dest >= (struct dma_cb3 *) priv->dma_buf_end) {
-			printk(KERN_ERR "pwm-stepper Exceeding size of max steps\n");
+			printk(KERN_ERR "pwm-stepper Exceeding size of max steps, pCbs_dest=0x%x dma_buf_end=0x%x\n", (int) pCbs_dest, (int) priv->dma_buf_end);
 			return -1;
 			}
 //		PRINTI("pwm-stepper debug total1 = %d, total2 = %d, range = %d, next1 = 0x%x, next2 = 0x%x\n", total1, total2, range, next1, next2);
@@ -797,12 +797,14 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 		range_ticks = timer_save * (PWM_FREQ / 1000000) +
 			p_cmd->combine_ticks_per_step * (copy_steps + build_steps);
 		for (ticks = 0, cntr = 0; pCbs3->next3 &&  /* find our delay point, at least one CB */
-					 pCbs3 < (struct dma_cb3 *) priv->cur_buf_end; cntr++, pCbs3++) {
+					 pCbs3 < (struct dma_cb3 *) priv->cur_buf_end; cntr++) {
+			pCbs3++;
 			if (ticks >= range_ticks)
 				break;
 			ticks += pCbs3->range;
 			}
-		if (ticks < range_ticks || !pCbs3->next3) {  /* didn't reach our delay point? */
+		if (ticks < range_ticks || !pCbs3->next3 ||  /* didn't reach our delay point? */
+			pCbs3 >= (struct dma_cb3 *) priv->cur_buf_end) {
 			printk(KERN_ERR "pwm-stepper didn't reach our delay point ticks=%d range_ticks=%d pCbs3->next3=0x%x increase COMBINE_TICKS_PER_STEP\n",
 				(int) ticks, (int) range_ticks, (int) pCbs3->next3);
 			report_debug("3");
