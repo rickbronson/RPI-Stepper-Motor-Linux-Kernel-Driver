@@ -231,18 +231,21 @@ struct STEPPER_SETUP setup[] =
 
 #define MAP_SIZE 4096UL
 #define MAP_MASK (MAP_SIZE - 1)
-static volatile int map_read_mem(off_t addr)
+static int map_read_mem(off_t addr)
   {
-  void *map_base, *virt_addr; 
+  void *map_base; 
+  void volatile *virt_addr; 
   int fd, retval;
 
-  if ((fd = open("/dev/mem", O_RDWR | O_SYNC)) == -1)
+  if ((fd = open("/dev/mem", O_RDWR | O_SYNC)) == -1) {
+		printf("Error, can't open /dev/mem, need to run as sudo\n");
     return (fd);
+		}
   /* Map one page */
   map_base = mmap(0, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, addr & ~MAP_MASK);
   if (map_base == (void *) -1)
     return -1;
-    
+
   virt_addr = map_base + (addr & MAP_MASK);
   retval = *((unsigned long *) virt_addr);
   if (munmap(map_base, MAP_SIZE) == -1)
@@ -432,7 +435,7 @@ int main(int argc,char **argv) {
 			exit(1);
 			}
 		system_timer_regs = map_read_mem(SYSTEM_TIMER_CLO) - system_timer_regs;
-		printf("write time = %d us 0x%x\n", system_timer_regs, map_read_mem(SYSTEM_TIMER_CLO));
+		printf("write time = %d us\n", system_timer_regs);
 		/* delay in milliseconds */
 		ts.tv_nsec = (msdelay % 1000) * 1000 * 1000;
 		ts.tv_sec = msdelay / 1000;

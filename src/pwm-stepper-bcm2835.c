@@ -79,7 +79,6 @@ NOTE: need to blacklist pwm-bcm2835
 #include <linux/of.h>
 #include <linux/pwm.h>
 #include "rpi4-stepper.h"
-#include "bcm2835-dma.h"
 
 MODULE_AUTHOR("Rick Bronson <rick@efn.org>");
 MODULE_LICENSE("GPL");
@@ -319,7 +318,6 @@ struct stepper_priv {
 	spinlock_t lock;
 	struct dma_chan	*dma_chan_tx;  /* DMA channel for writes */
 	int irq_number;
-	struct bcm2835_chan *bcm2835_chan;
 	struct dma_slave_config dma_cfg;
 	dma_addr_t dma_handle;
 	struct pwm_dma_data *dma_send_buf;  /* dma data to send to motor step pin via pwm */
@@ -818,15 +816,16 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 			pCbs3_build = (struct dma_cb3 *)priv->build_cbs;
 		else
 			pCbs3_build = NULL;
-		set_gpios(priv);  /* set GPIO's as close to combine (this should really be in the DMA stream) */
 		combine_steps = combine_dma_threads(priv, pCbs3, pCbs3_start, pCbs3_build);
 		if (combine_steps > 0) {  /* did combine work? */
 			if (pCbs3 < (struct dma_cb3 *) dma_regs->conblk_ad ||  /* has DMA advanced passed where we did combine? */
 				  !(dma_regs->cs & DMA_ACTIVE && dma_regs->conblk_ad)) {  /* not still doing a DMA? */
 				report_debug("6");
+				set_gpios(priv);  /* debug only (this should really be in the DMA stream) */
 				printk(KERN_ERR "pwm-stepper took too long to copy/build/combine\n");
 				return -EINVAL;  /* error */
 				}
+			set_gpios(priv);  /* debug only (this should really be in the DMA stream) */
 			}
 		else {
 			report_debug("5");
@@ -868,7 +867,6 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	priv->base = devm_ioremap_resource(dev, res);
-//	PRINTI("pwm-stepper debug PWM base from DT = 0x%x\n", (int) res);
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
@@ -905,13 +903,12 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 		goto out4;
 		}
 	priv->dma_chan_tx = dma_request_chan(dev, "rx-tx");
-	priv->bcm2835_chan = to_bcm2835_dma_chan(priv->dma_chan_tx);
-	priv->irq_number = priv->bcm2835_chan->irq_number;  /* save our int number */
-	free_irq(priv->irq_number, priv->bcm2835_chan);  /* free his interrupt! */
-	priv->dma_regs = &priv->dma_regs[priv->bcm2835_chan->ch];  /* move to our reg's */
-	/* steal the interrupt for this channel */
+#define DMA_CHANNEL 0  /* The channel we get from the last call */
+#define DMA_START_IRQ_NUM 39  /* NOTE: This seems to change with kernels! */
+	priv->irq_number = DMA_CHANNEL + DMA_START_IRQ_NUM; /* end up (/proc/interrupts) with: "39: * GICv2 112 * Stepper DMA IRQ" */
+	priv->dma_regs = &priv->dma_regs[DMA_CHANNEL];  /* move to our reg's */
 	if (request_irq(priv->irq_number, bcm2835_dma_callback, 0, "Stepper DMA IRQ", priv)) {
-		printk(KERN_ERR "pwm-stepper request_irq failed\n");
+		printk(KERN_ERR "pwm-stepper request_irq %d failed\n", priv->irq_number);
 		goto out4;
 		}
 	/* preallocate dma buffers */
