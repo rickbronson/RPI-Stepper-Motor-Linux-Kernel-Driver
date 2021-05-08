@@ -25,7 +25,7 @@ Constraints
 - When the minimum time cannot be satisfied then the driver will wait (or not) for the current DMA stream to finish for priv->step_cmd.wait_timeout (in milliseconds).  If this value is zero then it doesn't wait.
 - Maximum number of steps is hardcoded as MAX_STEPS in rpi4-stepper.h.  This has a big impact on the amount of alloc'd memory.
 - Max number of motors set by MAX_MOTORS.  This has a big impact on the amount of alloc'd memory.
-- You may have to tweak DMA_CHANNEL and DMA_START_IRQ_NUM depending on your kernel
+- You may have to tweak DMA_CHANNEL depending on your kernel
 
 Untested
 - Only tested on RPI-4

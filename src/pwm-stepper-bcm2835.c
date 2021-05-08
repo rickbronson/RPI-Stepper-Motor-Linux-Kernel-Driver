@@ -853,7 +853,8 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct stepper_priv *priv;
 	struct resource *res;
-	int ret = 0;
+	struct irq_desc *desc;
+	int virq, ret = 0;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv) {
@@ -896,7 +897,7 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 	priv->pcm_regs = ioremap(PCM_BASE, PAGE_SIZE);
 	priv->pwm_regs = (struct S_PWM_REGS *)priv->base;
 	priv->gpio_regs = (struct S_GPIO_REGS *)ioremap(GPIO_BASE, sizeof(struct S_GPIO_REGS));
-	if(!priv->gpio_regs || !priv->pwm_regs || !priv->pwm_clk_regs || !priv->dma_regs)
+	if (!priv->gpio_regs || !priv->pwm_regs || !priv->pwm_clk_regs || !priv->dma_regs)
 		{
 		printk(KERN_ERR "pwm-stepper: failed to ioremap\n");
 		ret = -ENOMEM;
@@ -904,8 +905,17 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 		}
 	priv->dma_chan_tx = dma_request_chan(dev, "rx-tx");
 #define DMA_CHANNEL 0  /* The channel we get from the last call */
-#define DMA_START_IRQ_NUM 39  /* NOTE: This seems to change with kernels! */
-	priv->irq_number = DMA_CHANNEL + DMA_START_IRQ_NUM; /* end up (/proc/interrupts) with: "39: * GICv2 112 * Stepper DMA IRQ" */
+#define DMA_START_VIRQ_NUM (80 + 32)  /* Gotten from "GIC_SPI 80..." in bcm2711.dtsi */
+	for (virq = 0; virq < 64; virq++) {  /* find our interrupt */
+		desc = irq_to_desc(virq);
+		if (desc->irq_data.hwirq == DMA_START_VIRQ_NUM)
+			break;
+		}
+	if (desc->irq_data.hwirq != DMA_START_VIRQ_NUM) {
+		printk(KERN_ERR "pwm-stepper can't find DMA interrupt 112\n");
+		goto out4;
+		}
+	priv->irq_number = virq + DMA_CHANNEL;
 	priv->dma_regs = &priv->dma_regs[DMA_CHANNEL];  /* move to our reg's */
 	if (request_irq(priv->irq_number, bcm2835_dma_callback, 0, "Stepper DMA IRQ", priv)) {
 		printk(KERN_ERR "pwm-stepper request_irq %d failed\n", priv->irq_number);
