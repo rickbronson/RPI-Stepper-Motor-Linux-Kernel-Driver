@@ -102,6 +102,8 @@ MODULE_DESCRIPTION("Broadcom BCM2835 PWM for stepper motor driver");
 
 #define GPSET0 7  /* offset for gpio set/clr */
 #define GPCLR0 10
+#define GPIO_CLR (GPIO_BASE + GPCLR0 * 4)
+#define GPIO_SET (GPIO_BASE + GPSET0 * 4)
 
 #define PWM_RNG1     4  /* offsets for PWM reg's */
 #define PWM_FIFO1    6
@@ -296,11 +298,13 @@ struct dma_cb3 {  /* to make it easier to deal with 3 control blocks that entail
 };
 
 #define PWM_CBS_PER_STEP 6  /* PWM control blocks per step */
+#define PWM_CBS_DUMMY (PWM_CBS_PER_STEP + 1)  /* Dummy so we don't match when searching */
 #define PWM_MAX_CBS (MAX_STEPS * PWM_CBS_PER_STEP)
 struct pwm_dma_data {  /* everything got with alloc coherent */
 	struct dma_cb1 run_cbs[PWM_MAX_CBS];  /* DMA run cbs's, must be on 8 word boundry */
 	u32 range[MAX_STEPS * 2];  /* * 2 because we won't always have the same delay for each half cycle */
-	u32 step_gpio_mask[MAX_MOTORS];
+	u32 gpio_set_mask[MAX_MOTORS];  /* mask for setting microstep/dir GPIO's */
+	u32 gpio_clr_mask[MAX_MOTORS];  /* mask for clearing microstep/dir GPIO's */
 	};
 
 struct stepper_priv {
@@ -564,7 +568,8 @@ static void start_dma(struct stepper_priv *priv)
 static inline struct dma_cb1 *build1step(struct stepper_priv *priv, struct dma_cb1 *pCbs, int step, u32 half_period, int motor, BUILDTYPE flag)
 	{  /* half the period for high and low half-cycles */
 	struct pwm_dma_data *dma_send_buf = priv->dma_send_buf;
-	int *p_step_gpio_mask = &dma_send_buf->step_gpio_mask[motor];
+	int *p_gpio_set_mask = &dma_send_buf->gpio_set_mask[motor];
+	int *p_gpio_clr_mask = &dma_send_buf->gpio_clr_mask[motor];
 	u32 *p_range = &dma_send_buf->range[step * 2];
 	int cb_dx = 0;  /* DMA block index */
 
@@ -576,16 +581,16 @@ static inline struct dma_cb1 *build1step(struct stepper_priv *priv, struct dma_c
   /* set range on PWM for half_period */
 	BUILD_CB(NORMAL_DMA, p_range++, PWM_BASE + PWM_RNG1 * 4, cb_dx++, motor);
   /* delay, half_period range amount via PWM */
-	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), p_step_gpio_mask, PWM_BASE + PWM_FIFO1 * 4, cb_dx++, motor);
+	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), p_gpio_set_mask, PWM_BASE + PWM_FIFO1 * 4, cb_dx++, motor);
 	/* Set GPIO high */
-	BUILD_CB(NORMAL_DMA, p_step_gpio_mask, GPIO_BASE + GPSET0 * 4, cb_dx++, motor);
+	BUILD_CB(NORMAL_DMA, p_gpio_set_mask, GPIO_SET, cb_dx++, motor);
 	/* Same as above 3 except Set GPIO low */
 	if (flag == USE_DMA_BUF)
 		*p_range = half_period;
 	pCbs->range = half_period;
 	BUILD_CB(NORMAL_DMA, p_range, PWM_BASE + PWM_RNG1 * 4, cb_dx++, motor);
-	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), p_step_gpio_mask, PWM_BASE + PWM_FIFO1 * 4, cb_dx++, motor);
-	BUILD_CB(NORMAL_DMA, p_step_gpio_mask, GPIO_BASE + GPCLR0 * 4, cb_dx++, motor);
+	BUILD_CB(NORMAL_DMA | TIMED_DMA(5), p_gpio_clr_mask, PWM_BASE + PWM_FIFO1 * 4, cb_dx++, motor);
+	BUILD_CB(NORMAL_DMA, p_gpio_clr_mask, GPIO_CLR, cb_dx++, motor);
 
 	return (pCbs);
 	}
@@ -593,17 +598,35 @@ static inline struct dma_cb1 *build1step(struct stepper_priv *priv, struct dma_c
 /* build DMA control blocks, pass in destination pCB, returns number of steps built or 0 */
 static int build_dma_thread(struct stepper_priv *priv, BUILDTYPE flag)
 	{
-	int limit, cntr, up_index, steps = 0, freq, diff;
 	struct STEPPER_SETUP *p_cmd = &priv->step_cmd;
-	int motor = priv->gpio2motor[p_cmd->gpios[GPIO_STEP]];
 	struct dma_cb1 *pCbs, *pCbs_reverse;
+	struct pwm_dma_data *dma_send_buf = priv->dma_send_buf;
+	int motor = priv->gpio2motor[p_cmd->gpios[GPIO_STEP]];
+	int *p_gpio_set_mask = &dma_send_buf->gpio_set_mask[motor];
+	int *p_gpio_clr_mask = &dma_send_buf->gpio_clr_mask[motor];
 	int distance = abs(p_cmd->distance);
+	int limit, cntr, up_index, steps = 0, freq, diff, set_mask, clr_mask;
 
 	if (flag == USE_DMA_BUF)
 		pCbs = priv->dma_send_buf->run_cbs;
 	else
 		pCbs = priv->build_cbs;
 		
+  /* first, setup GPIO set/clears */
+	set_mask = clr_mask = 1 << p_cmd->gpios[GPIO_STEP];  /* set our step GPIO */
+	for (cntr = GPIO_MICROSTEP0; cntr <= GPIO_MICROSTEP2; cntr++) {
+		if (p_cmd->microstep_control & (1 << cntr))
+			set_mask |= 1 << p_cmd->gpios[cntr];
+		else
+			clr_mask |= 1 << p_cmd->gpios[cntr];
+		}
+	if (p_cmd->distance >= 0)
+		set_mask |= 1 << p_cmd->gpios[GPIO_DIRECTION];
+	else
+		clr_mask |= 1 << p_cmd->gpios[GPIO_DIRECTION];
+	*p_gpio_set_mask = set_mask;
+	*p_gpio_clr_mask = clr_mask;
+
 	/* do UP ramp, First go 1/2 the UP ramp: can't exceed 1/4
 		 the distance and can't go over 1/2 max speed */
 	freq = p_cmd->min_speed;  /* start off freq */
@@ -657,17 +680,6 @@ static int build_dma_thread(struct stepper_priv *priv, BUILDTYPE flag)
 	return steps;
 	}
 
-/* set the microstep and direction GPIO's */
-static void set_gpios(struct stepper_priv *priv)
-	{
-	struct STEPPER_SETUP *p_cmd = &priv->step_cmd;
-
-	gpio_direction_output(p_cmd->gpios[GPIO_MICROSTEP0], p_cmd->microstep_control >> 0);
-	gpio_direction_output(p_cmd->gpios[GPIO_MICROSTEP1], p_cmd->microstep_control >> 1);
-	gpio_direction_output(p_cmd->gpios[GPIO_MICROSTEP2], p_cmd->microstep_control >> 2);
-	gpio_direction_output(p_cmd->gpios[GPIO_DIRECTION], p_cmd->distance >= 0 ? 1 : 0);
-	}
-
 static irqreturn_t bcm2835_dma_callback(int irq, void *data)
 	{
 	struct stepper_priv *priv = data;
@@ -714,7 +726,6 @@ static size_t wait_build(struct stepper_priv *priv, size_t count)
 			}
 //		PRINTI("pwm-stepper done waiting for DMA interrupt\n");
 		}
-	set_gpios(priv);  /* only set GPIO's after wait */
 	if ((steps = build_dma_thread(priv, USE_DMA_BUF))) { /* build to real DMA area */
 		priv->cur_buf_end = priv->dma_send_buf->run_cbs + steps * PWM_CBS_PER_STEP;  /* save end, NOTE: the build to non DMA buffer won't be used */
 		start_dma(priv);
@@ -751,7 +762,6 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 
 	if (priv->gpio2motor[p_cmd->gpios[GPIO_STEP]] == NO_MOTOR)
 		{  /* this is a new motor request gpio's */
-		priv->dma_send_buf->step_gpio_mask[priv->motors] = 1 << p_cmd->gpios[GPIO_STEP];  /* set our step GPIO */
 		priv->gpio2motor[p_cmd->gpios[GPIO_STEP]] = priv->motors++;  /* set this motor */
 		/* Set the GPIO pins */
 //		PRINTI("pwm-stepper debug microstep_control = %d, step = %d, motor = %d\n", p_cmd->microstep_control, p_cmd->gpios[GPIO_STEP], priv->gpio2motor[p_cmd->gpios[GPIO_STEP]]);
@@ -821,11 +831,9 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 			if (pCbs3 < (struct dma_cb3 *) dma_regs->conblk_ad ||  /* has DMA advanced passed where we did combine? */
 				  !(dma_regs->cs & DMA_ACTIVE && dma_regs->conblk_ad)) {  /* not still doing a DMA? */
 				report_debug("6");
-				set_gpios(priv);  /* debug only (this should really be in the DMA stream) */
 				printk(KERN_ERR "pwm-stepper took too long to copy/build/combine\n");
 				return -EINVAL;  /* error */
 				}
-			set_gpios(priv);  /* debug only (this should really be in the DMA stream) */
 			}
 		else {
 			report_debug("5");
