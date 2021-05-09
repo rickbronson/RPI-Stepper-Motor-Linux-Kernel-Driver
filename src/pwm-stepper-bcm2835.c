@@ -322,7 +322,6 @@ struct stepper_priv {
 	spinlock_t lock;
 	struct dma_chan	*dma_chan_tx;  /* DMA channel for writes */
 	int irq_number;
-	struct dma_slave_config dma_cfg;
 	dma_addr_t dma_handle;
 	struct pwm_dma_data *dma_send_buf;  /* dma data to send to motor step pin via pwm */
 	int dma_size;
@@ -356,7 +355,7 @@ static int request_set_gpio(struct stepper_priv *priv, GPIO pin, int value)
 	return ret;
 	}
 
-/* fast copy 3 CB's, way faster than memcpy, roughly the same as "inline" and no reg pushes/pops */
+/* fast copy 3 CB's, way faster than memcpy */
 static noinline __naked void memcpy_cb3(struct dma_cb3 *dst, struct dma_cb3 *src, int size)
 	{
 	asm volatile (
@@ -733,15 +732,14 @@ static size_t wait_build(struct stepper_priv *priv, size_t count)
 	return count;
 	}
 
-int rick_debug3 = 0; /* keep track of time for debug */
 #define report_debug(num) \
 	PRINTI("pwm-stepper debug " num " cur_buf_end = 0x%x pCbs3 = 0x%x conblk = 0x%x cs = 0x%x index = %d\n", (int) priv->cur_buf_end, (int) pCbs3, (int) dma_regs->conblk_ad, (int) dma_regs->cs, pCbs->index); \
 	PRINTI("pwm-stepper debug copy/build/combine steps = %d %d %d delay CB's =%d\n", (int) copy_steps, (int) build_steps, (int) combine_steps, (int) cntr); \
 	PRINTI("pwm-stepper debug timing actual: copy+build %dus combine %dus, est: combine = %dus (%d percent)\n", \
     timer_save, \
-	  *priv->system_timer_regs - rick_debug3, \
+	  *priv->system_timer_regs - combine_time_sav, \
 	  (int) range_ticks / (PWM_FREQ / 1000000), \
-	  (int) (range_ticks / (PWM_FREQ / 1000000)) * 100 / (*priv->system_timer_regs - rick_debug3))
+	  (int) (range_ticks / (PWM_FREQ / 1000000)) * 100 / (*priv->system_timer_regs - combine_time_sav))
 
 /* take a command from user space, if we are not currently doing a DMA to a motor, just start a new DMA.  If we are already doing a DMA, find out where our current trasfer is (via conblk_ad) and calcuate how far we should move ahead, knowing how long it takes us to copy/build/combine, then start the combine at that point. */
 static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
@@ -755,6 +753,7 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 	struct dma_cb3 *pCbs3, *pCbs3_start, *pCbs3_build;  /* pointer to DMA control block triplet */
 	struct STEPPER_SETUP *p_cmd = &priv->step_cmd;
 	int timer_save, range_ticks, ticks, ret, cntr, copy_steps = 0, build_steps = 0, combine_steps = 0;
+	int combine_time_sav; /* keep track of time for debug */
 
 	memcpy(p_cmd, buffer, count);  /* insert this command */
 	if (!p_cmd->combine_ticks_per_step)  /* sanity check */
@@ -800,7 +799,7 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 			}
 		build_steps = build_dma_thread(priv, USE_BUILD_BUF);
 		/* calc range offset by adding the real time it took to copy/build plus a guess at combine */
-		rick_debug3 = *priv->system_timer_regs;  /* save current timer for real combine time */
+		combine_time_sav = *priv->system_timer_regs;  /* save current timer for real combine time */
 		timer_save = *priv->system_timer_regs - timer_save;  /* save time for copy/build */
 		range_ticks = timer_save * (PWM_FREQ / 1000000) +
 			p_cmd->combine_ticks_per_step * (copy_steps + build_steps);

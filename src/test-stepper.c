@@ -5,17 +5,14 @@ To make:
 make
 
 To run:
-./test-stepper -r 1 -d 1024 -g 1024 | less
-./test-stepper -r 1 -d 1024 -g 1024 | grep otal
-./test-stepper -r 1 -d 1024 -g 1024 | grep otal
- generate some waveform graphs:
-./test-stepper2 -d 200 -n 400 -s 1000 -r 1 -m 7 -g -v 
-./test-stepper2 -d 112 -n 400 -s 1000 -r 10 -m 7 -g -v 
- sudo ./test-stepper -d 400 -n 500 -s 500 -m 7 -i 16 -p 12
+sudo ~./test-stepper -r 1 -d 1024 | less
+sudo ~./test-stepper -r 1 -d 1024 | grep otal
+sudo ~/src/test-stepper -d 6400 -n 1004 -s 40000 -r 1 -m 7 -v -p 13
+sudo ~/src/test-stepper -d 400 -n 500 -s 500 -m 7 -i 16 -p 12
  - run both motors:
-cd ~/src; while true; do sudo ./test-stepper -g 2 -l 2 -y 200; sleep 3; done
+cd ~/src; while true; do sudo ./test-stepper -l 2 -y 200; sleep 3; done
  - run 1st motor, 2nd motor, then both:
-cd ~/src; while true; do sudo ./test-stepper -d 400 -n 500 -s 500 -m 7 -i 16 -p 12; sleep 1; sudo ./test-stepper -g 2 -l 1 -y 200; sleep 3; sudo ./test-stepper -g 2 -l 2 -y 200; sleep 3; done
+cd ~/src; while true; do sudo ./test-stepper -d 400 -n 500 -s 500 -m 7 -i 16 -p 12; sleep 1; sudo ./test-stepper -l 1 -y 200; sleep 3; sudo ./test-stepper -l 2 -y 200; sleep 3; done
 
  *********************************************************************/
 
@@ -74,7 +71,7 @@ struct dma_cb3 {  /* to make it easier to deal with 3 control blocks that entail
 
 /* A string listing valid short options letters.  */
 const char* program_name;  /* The name of this program.  */
-const char* const short_options = "d:s:n:m:p:i:g:r:l:a:y:tv";
+const char* const short_options = "d:s:n:m:p:i:r:l:a:y:tv";
   /* An array describing valid long options.  */
 const struct option long_options[] = {
     { "distance",      1, NULL, 'd' },
@@ -83,7 +80,6 @@ const struct option long_options[] = {
     { "microstep",     1, NULL, 'm' },
     { "step_gpio",     1, NULL, 'p' },
     { "dir_gpio",     1, NULL, 'i' },
-    { "toggle",     1, NULL, 'g' },
     { "ramp",     1, NULL, 'r' },
     { "loop",     1, NULL, 'l' },
     { "parse",     1, NULL, 'a' },
@@ -103,7 +99,6 @@ void print_usage (FILE* stream, int exit_code)
            "  -m  --microstep    Microstep [7]\n"
            "  -p  --step_gpio    Step GPIO [13]\n"
            "  -i  --dir_gpio     Dir GPIO [6]\n"
-           "  -g  --toggle       Toggle from passed -p/-i to default on loop\n"
            "  -r  --ramp         Ramp_aggressiveness 1-X (lower 4 bits are treated as a fraction)\n"
            "  -l  --loop         Loop count\n"
            "  -a  --parse        Parse address of DMA Control Blocks\n"
@@ -116,7 +111,6 @@ void print_usage (FILE* stream, int exit_code)
 struct stepper_priv {
 	struct STEPPER_SETUP step_cmd;
 	int verbose;
-	int toggle;
 	int last_range[32];
 	} priv_data = {0};
 
@@ -362,9 +356,6 @@ int main(int argc,char **argv) {
       case 'i':   /* -i or --dir_gpio */
 				priv->step_cmd.gpios[GPIO_DIRECTION] = strtoul (optarg, NULL, 0);
         break;
-      case 'g':   /* -g or --toggle */
-				priv->toggle = strtoul (optarg, NULL, 0);
-        break;
       case 'r':   /* -r or --ramp */
         priv->step_cmd.ramp_aggressiveness = strtoul (optarg, NULL, 0);
 				if (priv->step_cmd.ramp_aggressiveness <= 0) {
@@ -426,10 +417,10 @@ int main(int argc,char **argv) {
 			}
 
 		system_timer_regs = map_read_mem(SYSTEM_TIMER_CLO);
-		if (priv->toggle && (priv->toggle - 1 > loop_cntr)) {
+		if (loop_cntr) {  /* don't copy on first one since they may have overwritten from command line options */
 			memcpy(&priv->step_cmd, &setup[loop_cntr], sizeof(struct STEPPER_SETUP));
 			}
-		printf("memcpy toggle = %d gpio = %d, distance = %d\n", priv->toggle, priv->step_cmd.gpios[GPIO_STEP], priv->step_cmd.distance);
+		printf("memcpy gpio = %d, distance = %d\n", priv->step_cmd.gpios[GPIO_STEP], priv->step_cmd.distance);
 		if (write(fd, &priv->step_cmd, sizeof(priv->step_cmd)) != sizeof(priv->step_cmd)) {
 			perror(STEP_CMD_FILE);
 			exit(1);
