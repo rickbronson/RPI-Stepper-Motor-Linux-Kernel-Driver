@@ -63,7 +63,6 @@ struct dma_cb3 {  /* to make it easier to deal with 3 control blocks that entail
 	u32 pad3[2];
 };
 
-#define ARRAY_SIZE(s) (sizeof(s) / sizeof(*s))
 #define PERI_BASE   0xfe000000
 #define SYSTEM_TIMER_CLO (PERI_BASE + 0x00003004)  /* based on 1 MHz */
 
@@ -114,7 +113,7 @@ struct stepper_priv {
 	int last_range[32];
 	} priv_data = {0};
 
-#define PERIOD_INC 10  /* in tenth's */
+#define DEFAULT_AGGRESSIVENESS 10  /* lower 8 bits treated as a fractions */
 struct STEPPER_SETUP setup[] =
 	{
 	{
@@ -123,7 +122,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 777,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 777,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_13,
 	.gpios[GPIO_DIRECTION] = GPIO_06,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -136,7 +135,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 500,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 500,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_12,
 	.gpios[GPIO_DIRECTION] = GPIO_16,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -149,7 +148,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 666,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 666,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_13,
 	.gpios[GPIO_DIRECTION] = GPIO_06,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -162,7 +161,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 555,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 555,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_12,
 	.gpios[GPIO_DIRECTION] = GPIO_16,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -175,7 +174,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 600,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 600,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_13,
 	.gpios[GPIO_DIRECTION] = GPIO_06,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -188,7 +187,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 650,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 650,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_12,
 	.gpios[GPIO_DIRECTION] = GPIO_16,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -201,7 +200,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 700,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 700,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_13,
 	.gpios[GPIO_DIRECTION] = GPIO_06,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -214,7 +213,7 @@ struct STEPPER_SETUP setup[] =
 	.min_speed = 650,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.max_speed = 650,  /* max speed in steps/second NOTE: if = 0 then stop */
 	.microstep_control = 7,  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, etc */
-	.ramp_aggressiveness = PERIOD_INC,
+	.ramp_aggressiveness = DEFAULT_AGGRESSIVENESS,
 	.gpios[GPIO_STEP] = GPIO_12,
 	.gpios[GPIO_DIRECTION] = GPIO_16,
 	.gpios[GPIO_MICROSTEP0] = GPIO_19,
@@ -225,7 +224,7 @@ struct STEPPER_SETUP setup[] =
 
 #define MAP_SIZE 4096UL
 #define MAP_MASK (MAP_SIZE - 1)
-static int map_read_mem(off_t addr)
+static int map_read_mem(off_t addr)  /* map memory */
   {
   void *map_base; 
   void volatile *virt_addr; 
@@ -249,17 +248,17 @@ static int map_read_mem(off_t addr)
   }
 
 #define SZ_4K				0x00001000
-#define SZ_8K				0x00002000
-#define SZ_16K				0x00004000
-#define SZ_32K				0x00008000
-#define SZ_64K				0x00010000
-#define SZ_1M				0x00100000
-#define SZ_2M				0x00200000
+#define SZ_8K			0x00002000
+#define SZ_16K		0x00004000
+#define SZ_32K		0x00008000
+#define SZ_64K		0x00010000
+#define SZ_1M			0x00100000
+#define SZ_2M			0x00200000
 #define PARSE_MAP_SIZE SZ_1M
 #define PARSE_MAP_MASK (PARSE_MAP_SIZE - 1)
 #define PA_MASK 0x1fffffff  /* kludge to get phys address */
 
-/* parse passed address that points to DMA Control blocs eg "-a 0x1ee40000 */
+/* parse passed address that points to DMA Control blocs eg "-a 0xfe003000 */
 static int parse_cbs(struct stepper_priv *priv, off_t parse)
 	{
   void *map_base, *virt_addr; 
@@ -312,8 +311,6 @@ static int parse_cbs(struct stepper_priv *priv, off_t parse)
     return -1;
   return 0;
 	}
-
-	
 
 /*
  * Main program:
@@ -434,7 +431,6 @@ int main(int argc,char **argv) {
 			printf("tv_nsec = %d, tv_sec = %d\n", ts.tv_nsec, ts.tv_sec);
 		nanosleep(&ts, NULL);
 		}
-	// fflush(fd);
 	close(fd);
 	return 0;
 	}

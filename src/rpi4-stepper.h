@@ -57,38 +57,34 @@ typedef enum {
 	GPIO_STEP,
 	GPIO_CONTROL_MAX,} GPIO_CONTROL;
 
-/* RAMP pins available on connector p1 */
-typedef enum {RAMP_LOW = 0,
-	RAMP_MODERATE = 1,
-	RAMP_HIGH = 2} RAMP;
-
 /* GPIO pins available on connector p1 */
-typedef enum {GPIO_02 = 2,
-              GPIO_03 = 3,
-              GPIO_04 = 4,
-              GPIO_05 = 5,
-              GPIO_06 = 6,
-              GPIO_07 = 7,
-              GPIO_08 = 8,
-              GPIO_09 = 9,
-              GPIO_10 = 10,
-              GPIO_11 = 11,
-              GPIO_12 = 12,
-              GPIO_13 = 13,
-              GPIO_14 = 14,
-              GPIO_15 = 15,
-              GPIO_16 = 16,
-              GPIO_17 = 17,
-              GPIO_18 = 18,
-              GPIO_19 = 19,
-              GPIO_20 = 20,
-              GPIO_21 = 21,
-              GPIO_22 = 22,
-              GPIO_23 = 23,
-              GPIO_24 = 24,
-              GPIO_25 = 25,
-              GPIO_26 = 26,
-              GPIO_27 = 27} GPIO;
+typedef enum {
+	GPIO_02 = 2,
+	GPIO_03 = 3,
+	GPIO_04 = 4,
+	GPIO_05 = 5,
+	GPIO_06 = 6,
+	GPIO_07 = 7,
+	GPIO_08 = 8,
+	GPIO_09 = 9,
+	GPIO_10 = 10,
+	GPIO_11 = 11,
+	GPIO_12 = 12,
+	GPIO_13 = 13,
+	GPIO_14 = 14,
+	GPIO_15 = 15,
+	GPIO_16 = 16,
+	GPIO_17 = 17,
+	GPIO_18 = 18,
+	GPIO_19 = 19,
+	GPIO_20 = 20,
+	GPIO_21 = 21,
+	GPIO_22 = 22,
+	GPIO_23 = 23,
+	GPIO_24 = 24,
+	GPIO_25 = 25,
+	GPIO_26 = 26,
+	GPIO_27 = 27} GPIO;
 
 /* struct to send to /sys/kernel/stepper */
 struct STEPPER_SETUP
@@ -101,7 +97,8 @@ struct STEPPER_SETUP
 	u32 min_speed;  /* max speed in steps/second */
 	u8 microstep_control;  /* bit 0 is value for gpio_microstep0, bit 1 = microstep1, set the step mode - 0=full, 1=1/2, 2=1/4, 3=1/8/ 4=1/16, etc step. Internal pulldown.
  */
-	RAMP ramp_aggressiveness;  /* 0 = 1/2 ramp up/down 1=1/3, 2=1/4, 3=1/5, etc */
+	u32 ramp_aggressiveness;  /* how aggressive the ramp up/down is  */
+#define DIFF_SCALE (1 << 8)  /* divisor used for aggressiveness, lower bits treated as fraction */
 	GPIO gpios[GPIO_CONTROL_MAX];  /* any GPIO */
 	u32 wait_timeout;  /* how long (in ms) to wait if below the minimum time to combine, if 0 then don't wait */
 	u32 combine_ticks_per_step;  /* sets the number of ticks (1/PWM_FREQ) to build one step in the combine routine, see default below */
@@ -109,8 +106,7 @@ struct STEPPER_SETUP
 	};
 
 #define MAX_MOTORS 4 /* max number of motors we'll drive */
-#define MAX_STEPS 10000  // 12000 fails priv alloc
-#define DIFF_SCALE (1 << 8)  /* divisor used for aggressiveness, lower bits treated as fraction */
+#define MAX_STEPS 10000  /* NOTE: with 4 motors, 12000 fails priv alloc */
 #define RPI4_CRYSTAL_FREQ 54000000
 #define PWM_FREQ (RPI4_CRYSTAL_FREQ / 2)  /* set for max granularity */
 #define COMBINE_TICKS_PER_STEP (PWM_FREQ / 400000)  /* gotten by trial and error */
