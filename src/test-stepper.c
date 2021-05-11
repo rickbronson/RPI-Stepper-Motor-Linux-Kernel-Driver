@@ -98,7 +98,7 @@ void print_usage (FILE* stream, int exit_code)
            "  -m  --microstep    Microstep [7]\n"
            "  -p  --step_gpio    Step GPIO [13]\n"
            "  -i  --dir_gpio     Dir GPIO [6]\n"
-           "  -r  --ramp         Ramp_aggressiveness 1-X (lower 4 bits are treated as a fraction)\n"
+           "  -r  --ramp         Ramp_aggressiveness 1-X (lower 8 bits are treated as a fraction)\n"
            "  -l  --loop         Loop count\n"
            "  -a  --parse        Parse address of DMA Control Blocks\n"
            "  -y  --delay        Delay between loops in milliseconds\n"
@@ -417,13 +417,15 @@ int main(int argc,char **argv) {
 		if (loop_cntr) {  /* don't copy on first one since they may have overwritten from command line options */
 			memcpy(&priv->step_cmd, &setup[loop_cntr], sizeof(struct STEPPER_SETUP));
 			}
-		printf("memcpy gpio = %d, distance = %d\n", priv->step_cmd.gpios[GPIO_STEP], priv->step_cmd.distance);
+		if (priv->verbose)
+			printf("gpio = %d, distance = %d\n", priv->step_cmd.gpios[GPIO_STEP], priv->step_cmd.distance);
 		if (write(fd, &priv->step_cmd, sizeof(priv->step_cmd)) != sizeof(priv->step_cmd)) {
 			perror(STEP_CMD_FILE);
 			exit(1);
 			}
 		system_timer_regs = map_read_mem(SYSTEM_TIMER_CLO) - system_timer_regs;
-		printf("write time = %d us\n", system_timer_regs);
+		if (priv->verbose)
+			printf("write time = %d us\n", system_timer_regs);
 		/* delay in milliseconds */
 		ts.tv_nsec = (msdelay % 1000) * 1000 * 1000;
 		ts.tv_sec = msdelay / 1000;

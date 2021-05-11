@@ -274,6 +274,7 @@ struct dma_cb3 {  /* to make it easier to deal with 3 control blocks that entail
 	u32 pad3[2];
 };
 
+#define MIN_STEPS 2  /* min for copy or delete */
 #define PWM_CBS_PER_STEP 6  /* PWM control blocks per step */
 #define PWM_CBS_DUMMY (PWM_CBS_PER_STEP + 1)  /* Dummy so we don't match when searching */
 #define PWM_MAX_CBS (MAX_STEPS * PWM_CBS_PER_STEP)
@@ -385,8 +386,8 @@ static int copy_del_cbs(struct stepper_priv *priv, struct dma_cb3 *pCbs_dest, st
 		(pCbs_dest - 1)->next3 = 0;  /* mark last dest as the last */
 		}
 	else  /* nothing copied */
-		if (deleted < PWM_CBS_PER_STEP * priv->motors)  /* minimum deleted? */
-			return (PWM_CBS_PER_STEP - 1);  /* make sure caller waits */
+		if (deleted < MIN_STEPS * priv->motors)  /* minimum deleted? */
+			return (MIN_STEPS - 1);  /* make sure caller waits */
 		else
 			return 0;
 	return half_steps / 2;  /* return full steps */
@@ -691,6 +692,8 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 	int combine_time_sav; /* keep track of time for debug */
 
 	memcpy(p_cmd, buffer, count);  /* get this command */
+	if (!p_cmd->min_speed)  /* sanity check */
+		p_cmd->min_speed = 1;  /* set to min */
 	if (!p_cmd->combine_ticks_per_step)  /* sanity check */
 		p_cmd->combine_ticks_per_step = COMBINE_TICKS_PER_STEP;
 
@@ -727,7 +730,7 @@ static ssize_t step_cmd_write(struct file *filp, struct kobject *kobj,
 		pCbs3_start = pCbs3 = (struct dma_cb3 *) pCbs;  /* switch to looking at half steps */
 		copy_steps = copy_del_cbs(priv, priv->copy_cbs, pCbs3,
 			priv->gpio2motor[p_cmd->gpios[GPIO_STEP]]);
-		if (copy_steps && copy_steps < PWM_CBS_PER_STEP * priv->motors) {  /* needs to be a minimum amount */
+		if (copy_steps && copy_steps < MIN_STEPS * priv->motors) {  /* needs to be a minimum amount */
 			report_debug("2");
 			printk(KERN_ERR "pwm-stepper didn't pass minimum amount test copy_steps=%d\n", copy_steps);
 			return (wait_build(priv, count));

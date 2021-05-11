@@ -26,6 +26,7 @@ Constraints
 - Maximum number of steps is hardcoded as MAX_STEPS in rpi4-stepper.h.  This has a big impact on the amount of alloc'd memory.
 - Max number of motors set by MAX_MOTORS.  This has a big impact on the amount of alloc'd memory.
 - You may have to tweak DMA_CHANNEL depending on your kernel
+- Minimum speed needs to be greater than 0
 
 Untested
 - Only tested on RPI-4
